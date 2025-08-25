@@ -6,7 +6,7 @@ CC := $(CROSS_COMPILE)gcc
 writer : $(OBJFS)
 	$(CC) $(CFLAGS) $(INCLUDES) $(OBJFS) -o writer $(LDFLAGS)
 
-%.o: %.c
+%.o : %.c
     $(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 clean:
