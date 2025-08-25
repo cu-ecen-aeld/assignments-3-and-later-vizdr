@@ -3,6 +3,8 @@ OBJFS := $(SRC:.c=.o)
 
 CC := $(CROSS_COMPILE)gcc
 
+all: writer
+
 writer : $(OBJFS)
 	$(CC) $(CFLAGS) $(INCLUDES) $(OBJFS) -o writer $(LDFLAGS)
 
