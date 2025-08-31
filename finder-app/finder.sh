@@ -1,4 +1,4 @@
-#!/bin/bash
+#!bin/sh
 
 if [ $# -lt 2 ]; then
 	echo "Error: number of argumrnts is less then 2. The first arg is directory to search in, the second arg is string to find within the files of the directory"
