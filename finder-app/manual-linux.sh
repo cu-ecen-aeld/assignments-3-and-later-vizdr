@@ -18,6 +18,25 @@ FINDER_APP_DIR=$(realpath $(dirname $0))
 ARCH=arm64
 CROSS_COMPILE=aarch64-none-linux-gnu-
 
+# Locate the readelf binary
+READELF_PATH=$(command -v aarch64-none-linux-gnu-readelf)
+if [ -z "$READELF_PATH" ]; then
+    echo "aarch64-none-linux-gnu-readelf not found" >&2
+    exit 1
+fi
+
+TOOLCHAIN_DIR=$(dirname "$(dirname "$READELF_PATH")")
+TOOLCHAIN_SYSROOT=${TOOLCHAIN_DIR}/aarch64-none-linux-gnu/libc
+
+# Validate the libc (sysroot) exists
+if [ ! -d "$TOOLCHAIN_SYSROOT" ]; then
+    echo "The toolchain sysroot directory (...libc) does not exist" >&2
+    exit 1
+fi
+
+# Store the directory for this script
+SCRIPT_DIR="$PWD"
+
 if [ $# -lt 1 ]
 then
 	echo "Using default directory ${OUTDIR} for output"
@@ -82,6 +101,7 @@ cd "$OUTDIR"
 if [ ! -d "${OUTDIR}/busybox" ]
 then
     git clone git://busybox.net/busybox.git
+
     cd busybox
     git checkout ${BUSYBOX_VERSION}
     
@@ -89,19 +109,20 @@ then
     echo "We configure BusyBox"    
     make distclean
     make defconfig
-    echo "We make BusyBox"
-    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE}
+
 else
     cd busybox
 fi
 
 # TODO: Make and install busybox
+echo "We make BusyBox"
+make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE}
 echo "We fill rootfs with BusyBox"
 make CONFIG_PREFIX="${OUTDIR}/rootfs" ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} install
 
 echo "Library dependencies"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
+${CROSS_COMPILE}readelf -a /usr/bin/busybox | grep "program interpreter"
+${CROSS_COMPILE}readelf -a /usr/bin/busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
 echo "We readout dependencies of BusyBox and copy to rootfs"
@@ -110,7 +131,6 @@ cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.s
 cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64/libm.so.6
 cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64/libresolv.so.2
 cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64/libc.so.6
-
 
 # TODO: Make device nodes
 echo "We establish 2 device nodes"
@@ -146,6 +166,6 @@ cd "${OUTDIR}/rootfs"
 find . | cpio -H newc -ov --owner root:root > ${OUTDIR}/initramfs.cpio
 gzip -f ${OUTDIR}/initramfs.cpio
 
-echo "completed!!!"
+echo "Completed!!!"
 
 
