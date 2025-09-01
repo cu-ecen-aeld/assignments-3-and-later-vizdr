@@ -18,12 +18,6 @@ FINDER_APP_DIR=$(realpath $(dirname $0))
 ARCH=arm64
 CROSS_COMPILE=aarch64-none-linux-gnu-
 
-# Locate the readelf binary
-READELF_PATH=$(command -v aarch64-none-linux-gnu-readelf)
-if [ -z "$READELF_PATH" ]; then
-    echo "aarch64-none-linux-gnu-readelf not found" >&2
-    exit 1
-fi
 
 if [ $# -lt 1 ]
 then
@@ -109,8 +103,8 @@ echo "We fill rootfs with BusyBox"
 make CONFIG_PREFIX="${OUTDIR}/rootfs" ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} install
 
 echo "Library dependencies"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
+${CROSS_COMPILE}readelf -a /bin/busybox | grep "program interpreter"
+${CROSS_COMPILE}readelf -a /bin/busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
 echo "We readout dependencies of BusyBox and copy to rootfs"
@@ -119,6 +113,7 @@ cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.s
 cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64/libm.so.6
 cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64/libresolv.so.2
 cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64/libc.so.6
+
 
 # TODO: Make device nodes
 echo "We establish 2 device nodes"
