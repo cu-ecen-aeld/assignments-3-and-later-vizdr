@@ -18,6 +18,15 @@ FINDER_APP_DIR=$(realpath $(dirname $0))
 ARCH=arm64
 CROSS_COMPILE=aarch64-none-linux-gnu-
 
+# Locate the readelf binary
+READELF_PATH=$(command -v aarch64-none-linux-gnu-readelf)
+if [ -z "$READELF_PATH" ]; then
+    echo "aarch64-none-linux-gnu-readelf not found" >&2
+    exit 1
+fi
+
+TOOLCHAIN_DIR=$(dirname "$(dirname "$READELF_PATH")")
+TOOLCHAIN_SYSROOT=${TOOLCHAIN_DIR}/aarch64-none-linux-gnu/libc
 
 if [ $# -lt 1 ]
 then
@@ -107,12 +116,25 @@ ${CROSS_COMPILE}readelf -a /bin/busybox | grep "program interpreter"
 ${CROSS_COMPILE}readelf -a /bin/busybox | grep "Shared library"
 
 # TODO: Add library dependencies to rootfs
-echo "We readout dependencies of BusyBox and copy to rootfs"
-CROSS_COMPILE_FULLPATH=$(dirname $(which ${CROSS_COMPILE}readelf))
-cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib/ld-linux-aarch64.so.1
-cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64/libm.so.6
-cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64/libresolv.so.2
-cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64/libc.so.6
+# echo "We readout dependencies of BusyBox and copy to rootfs"
+# CROSS_COMPILE_FULLPATH=$(dirname $(which ${CROSS_COMPILE}readelf))
+# cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib/ld-linux-aarch64.so.1 ${OUTDIR}/rootfs/lib/ld-linux-aarch64.so.1
+# cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libm.so.6 ${OUTDIR}/rootfs/lib64/libm.so.6
+# cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libresolv.so.2 ${OUTDIR}/rootfs/lib64/libresolv.so.2
+# cp $CROSS_COMPILE_FULLPATH/../aarch64-none-linux-gnu/libc/lib64/libc.so.6 ${OUTDIR}/rootfs/lib64/libc.so.6
+
+
+# dependency for busybox program interpreter (i.e. /lib/ld-linux-aarch64.so.1) and shared libs
+BB_DEPS_PROG_INTERPRETER=$(${CROSS_COMPILE}readelf -a ${OUTDIR}/rootfs/bin/busybox | \
+    grep "program interpreter" | sed 's/.*: \([^]]*\).*/\1/')
+BB_DEPS_SHARED_LIBS=$(${CROSS_COMPILE}readelf -a ${OUTDIR}/rootfs/bin/busybox | \
+    grep "Shared library" | sed 's/.*\[\(.*\)\]/\1/')
+
+# copy libs from toolchain sysroot to rootfs for target
+cp ${TOOLCHAIN_SYSROOT}/${BB_DEPS_PROG_INTERPRETER} ${OUTDIR}/rootfs/lib
+for lib in ${BB_DEPS_SHARED_LIBS}; do
+    cp ${TOOLCHAIN_SYSROOT}/lib64/$lib ${OUTDIR}/rootfs/lib64
+done
 
 
 # TODO: Make device nodes
