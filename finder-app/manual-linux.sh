@@ -25,18 +25,6 @@ if [ -z "$READELF_PATH" ]; then
     exit 1
 fi
 
-TOOLCHAIN_DIR=$(dirname "$(dirname "$READELF_PATH")")
-TOOLCHAIN_SYSROOT=${TOOLCHAIN_DIR}/aarch64-none-linux-gnu/libc
-
-# Validate the libc (sysroot) exists
-if [ ! -d "$TOOLCHAIN_SYSROOT" ]; then
-    echo "The toolchain sysroot directory (...libc) does not exist" >&2
-    exit 1
-fi
-
-# Store the directory for this script
-SCRIPT_DIR="$PWD"
-
 if [ $# -lt 1 ]
 then
 	echo "Using default directory ${OUTDIR} for output"
@@ -148,7 +136,7 @@ make CROSS_COMPILE=${CROSS_COMPILE}
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
 echo "We copy the finder related scripts and executables to the rootfs/home directory"
-cp $FINDER_APP_DIR/finder-test.sh $FINDER_APP_DIR/finder.sh $FINDER_APP_DIR/writer "${OUTDIR}/rootfs/home"
+cp $FINDER_APP_DIR/finder-test.sh $FINDER_APP_DIR/finder.sh $FINDER_APP_DIR/writer.sh $FINDER_APP_DIR/writer "${OUTDIR}/rootfs/home"
 cp -r $FINDER_APP_DIR/../conf "${OUTDIR}/rootfs/home"
 cp $FINDER_APP_DIR/autorun-qemu.sh "${OUTDIR}/rootfs/home"
 cp conf/username.txt "${OUTDIR}/rootfs/home/conf"
@@ -166,6 +154,6 @@ cd "${OUTDIR}/rootfs"
 find . | cpio -H newc -ov --owner root:root > ${OUTDIR}/initramfs.cpio
 gzip -f ${OUTDIR}/initramfs.cpio
 
-echo "Completed!!!"
+echo "!!!Completed!!!"
 
 
