@@ -12,8 +12,9 @@ if [ ! -d $filedir ]; then
 	echo -e "Error: $filedir is not a valid directory"
        	exit 1
 else
-        lines_count=$(grep -r "$searchstr" "$filedir" | wc -l )
-	files_count=$(grep -rl "$searchstr" "$filedir" | wc -l)
+        lines_count=$(grep -r --binary-files=without-match "$searchstr" "$filedir" | wc -l )
+	files_count=$(grep -rl --binary-files=without-match "$searchstr" "$filedir" | wc -l)
  	echo "The number of files are $files_count and the number of matching lines are $lines_count"
 	exit 0
 fi
+
