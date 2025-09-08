@@ -1,10 +1,14 @@
+TARGET := writer
 SRC := writer.c
 OBJFS := $(SRC:.c=.o)
 
-CC := $(CROSS_COMPILE)gcc
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -Wall -Wextra -g
 
-writer : $(OBJFS)
-	$(CC) $(CFLAGS) $(INCLUDES) $(OBJFS) -o writer $(LDFLAGS)
+all: $(TARGET)
+
+$(TARGET) : $(OBJFS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(OBJFS) -o $(TARGET) $(LDFLAGS)
 
 clean:
-	-rm -f *.o writer *.elf *.map
+	-rm -f *.o $(TARGET) *.elf *.map
