@@ -1,4 +1,9 @@
-CC ?= $(CROSS_COMPILE)gcc
+# Specify the cross-compile executable
+CROSS_COMPILE ?=
+
+CC = $(CROSS_COMPILE)gcc
+$(info input: $(CROSS_COMPILE))
+$(info Using compiler: $(CC))
 CFLAGS ?= -g -Wall -Werror
 SRCDIR = .
 SRC = aesdsocket.c
@@ -8,9 +13,18 @@ OBJS := $(SRC:.c=.o)
 
 all: $(TARGET)
 
+# Building the Executable ($(TARGET)):
 $(TARGET) : $(OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) $(OBJS) -o $(TARGET) $(LDFLAGS)
 
+# $^ represents all prerequisites (the object files).
+# $@ represents the target name (the executable).
+
+
+
+# Compiling Source Files (%.o: %.c):
+# This is an implicit rule that tells make how to compile any .c file into a .o file.
+# $< represents the first prerequisite (the .c file).
 %.o : $(SRCDIR)/%.c
 	@if [ ! -f $< ]; then \
 	echo "Error: Source file $< not found"; \
