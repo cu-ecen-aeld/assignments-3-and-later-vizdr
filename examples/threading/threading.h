@@ -1,5 +1,13 @@
-#include <stdbool.h>
+#include <sys/time.h>
 #include <pthread.h>
+#include <sys/types.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+
 
 /**
  * This structure should be dynamically allocated and passed as
