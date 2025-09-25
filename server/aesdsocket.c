@@ -15,19 +15,21 @@
 #include <fcntl.h>
 #include <sys/queue.h>
 #include <pthread.h>
+#include <sys/time.h>
 
 #define PORT "9000"
 #define BACKLOG 10       // how many pending connections queue will hold
 #define MAXDATASIZE 1024 // max number of bytes we can get at once
+#define READWRITEFILETPATH "/var/tmp/aesdsocketdata"
 
 bool g_sigterm = false;
 bool g_sigint = false;
+pthread_mutex_t timestamp_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct client_data
 {
     int client_fd;
     char *client_addr_string;
-    const char *path_storage_file;
 };
 // ========== Thread list entry ==========
 struct thread_entry
@@ -42,8 +44,9 @@ TAILQ_HEAD(thread_list, thread_entry);
 struct thread_list finished_threads;
 pthread_mutex_t list_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t list_cond = PTHREAD_COND_INITIALIZER;
+
 // ========== Function prototypes ==========
-int write_packet_to_file(const char *message, size_t message_size, const char *filename)
+int write_packet_to_file(const char *message, size_t message_size)
 {
     if (message == NULL)
     {
@@ -55,12 +58,12 @@ int write_packet_to_file(const char *message, size_t message_size, const char *f
         return EXIT_SUCCESS;
     }
 
-    syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, filename);
+    syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
 
-    FILE *file = fopen(filename, "a");
+    FILE *file = fopen(READWRITEFILETPATH, "a");
     if (file == NULL)
     {
-        syslog(LOG_ERR, "Error opening file %s: %m\n", filename);
+        syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return EXIT_FAILURE;
     }
 
@@ -69,7 +72,7 @@ int write_packet_to_file(const char *message, size_t message_size, const char *f
     {
         syslog(
             LOG_ERR, "Error writing to file %s: tried to write %zu bytes, only %zu bytes written: %m\n",
-            filename, message_size, written);
+            READWRITEFILETPATH, message_size, written);
         fclose(file);
         return EXIT_FAILURE;
     }
@@ -77,7 +80,7 @@ int write_packet_to_file(const char *message, size_t message_size, const char *f
     // Ensure data is flushed to disk
     if (fflush(file) != 0)
     {
-        syslog(LOG_ERR, "Error flushing file %s: %m\n", filename);
+        syslog(LOG_ERR, "Error flushing file %s: %m\n", READWRITEFILETPATH);
         fclose(file);
         return EXIT_FAILURE;
     }
@@ -86,7 +89,54 @@ int write_packet_to_file(const char *message, size_t message_size, const char *f
     return EXIT_SUCCESS;
 }
 
-int read_packet_from_file(char *message, size_t message_size, int pos, const char *filename)
+void alarm_handler(int signo, siginfo_t *info, void *context)
+{
+    (void)signo;
+    (void)info;
+    (void)context;
+    time_t rawtime;
+    struct tm *timeinfo;
+    char buffer[80];
+
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(buffer, sizeof(buffer), "timestamp: %H:%M:%S\n", timeinfo);
+
+    pthread_mutex_lock(&timestamp_mutex);
+    if (write_packet_to_file(buffer, strlen(buffer)) != EXIT_SUCCESS)
+    {
+        syslog(LOG_ERR, "Failed to write timestamp to file\n");
+    }
+    pthread_mutex_unlock(&timestamp_mutex);
+}
+
+void launch_periodic_timer()
+{
+    struct sigaction sa;
+    struct itimerval timer_val;
+
+    // Install timer_handler as the signal handler for SIGALRM.
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = alarm_handler;
+    sigaction(SIGALRM, &sa, NULL);
+
+    // Configure the timer to expire after 10 sec... */
+    timer_val.it_value.tv_sec = 10;
+    timer_val.it_value.tv_usec = 0;
+    // ... and every 10 sec after that.
+    timer_val.it_interval.tv_sec = 10;
+    timer_val.it_interval.tv_usec = 0;
+    // Start a real timer.
+    if (setitimer(ITIMER_REAL, &timer_val, NULL) == -1)
+    {
+        perror("Error calling setitimer");
+        return;
+    }
+    return;
+}
+
+int read_packet_from_file(char *message, size_t message_size, int pos)
 {
     if (message_size == 0 || message == NULL)
     {
@@ -99,16 +149,16 @@ int read_packet_from_file(char *message, size_t message_size, int pos, const cha
         return -1;
     }
 
-    FILE *fd = fopen(filename, "r");
+    FILE *fd = fopen(READWRITEFILETPATH, "r");
     if (fd == NULL)
     {
-        syslog(LOG_ERR, "Error opening file %s: %m\n", filename);
+        syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return -1;
     }
 
     if (fseeko(fd, pos, SEEK_SET) != 0)
     {
-        syslog(LOG_ERR, "Error seeking file %s to position %ld: %m\n", filename, (long)pos);
+        syslog(LOG_ERR, "Error seeking file %s to position %ld: %m\n", READWRITEFILETPATH, (long)pos);
         fclose(fd);
         return -1;
     }
@@ -116,7 +166,7 @@ int read_packet_from_file(char *message, size_t message_size, int pos, const cha
     size_t read = fread(message, 1, message_size, fd);
     if (read < message_size && ferror(fd))
     {
-        syslog(LOG_ERR, "Error reading file %s: %m\n", filename);
+        syslog(LOG_ERR, "Error reading file %s: %m\n", READWRITEFILETPATH);
         fclose(fd);
         return -1;
     }
@@ -186,7 +236,7 @@ void *handle_client(void *arg)
     struct client_data *client_info = (struct client_data *)arg;
     int client_fd = client_info->client_fd;
     char *client_addr_str = client_info->client_addr_string;
-    const char *aesdsocketdata = client_info->path_storage_file;
+    // const char *aesdsocketdata = client_info->path_storage_file;
     free(client_info->client_addr_string);
     free(client_info);
 
@@ -196,7 +246,7 @@ void *handle_client(void *arg)
     {
         syslog(LOG_ERR, "not enough memory: %m\n");
         close(client_fd);
-        return EXIT_FAILURE;
+        return (void *)EXIT_FAILURE;
     }
 
     long int received_num_bytes;
@@ -215,12 +265,6 @@ void *handle_client(void *arg)
 
     printf("Client connected (fd=%d)\n", client_fd);
 
-    /*     while ((bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0)) > 0) {
-            buffer[bytes] = '\0';
-            printf("Client %d says: %s\n", client_fd, buffer);
-            send(client_fd, buffer, bytes, 0); // echo back
-        }
-    */
     // Receive data and send back
     while ((received_num_bytes = recv(client_fd, buffer, MAXDATASIZE, 0)) > 0)
     {
@@ -231,11 +275,13 @@ void *handle_client(void *arg)
             first_packet_length = eol - buffer + 1; // Include the newline character
             syslog(LOG_DEBUG, "Found packet delimiter at %ld\n", received_num_bytes);
 
-            if (write_packet_to_file(buffer, received_num_bytes, aesdsocketdata) != EXIT_SUCCESS)
+            pthread_mutex_lock(&timestamp_mutex);
+            if (write_packet_to_file(buffer, received_num_bytes) != EXIT_SUCCESS)
             {
                 received_num_bytes = -1;
                 break;
             }
+            pthread_mutex_unlock(&timestamp_mutex);
 
             // Then receive the next packet if any
             second_packet_length = received_num_bytes - first_packet_length;
@@ -246,12 +292,12 @@ void *handle_client(void *arg)
                 syslog(LOG_ERR, "not enough memory for the next packet: %m\n");
                 close(client_fd);
                 free(buffer);
-                return EXIT_FAILURE;
+                return (void *)EXIT_FAILURE;
             }
 
             memcpy(second_packet, eol + 1, second_packet_length);
 
-            while ((size_to_send = read_packet_from_file(buffer, MAXDATASIZE, pos, aesdsocketdata)) > 0)
+            while ((size_to_send = read_packet_from_file(buffer, MAXDATASIZE, pos)) > 0)
             {
                 pos += size_to_send;
                 if (sendall(client_fd, buffer, size_to_send) == -1)
@@ -260,7 +306,7 @@ void *handle_client(void *arg)
                     close(client_fd);
                     free(buffer);
                     free(second_packet);
-                    return EXIT_FAILURE;
+                    return (void *)EXIT_FAILURE;
                 }
                 if (size_to_send != MAXDATASIZE)
                 {
@@ -274,17 +320,21 @@ void *handle_client(void *arg)
                 close(client_fd);
                 free(buffer);
                 free(second_packet);
-                return EXIT_FAILURE;
+                return (void *)EXIT_FAILURE;
             }
             // Finally write the remaining part of the second packet if any
-            if (write_packet_to_file(second_packet, second_packet_length, aesdsocketdata) != EXIT_SUCCESS)
+            pthread_mutex_lock(&timestamp_mutex);
+            if (second_packet != NULL && second_packet_length > 0)
             {
-                received_num_bytes = -1;
+                if (write_packet_to_file(second_packet, second_packet_length) != EXIT_SUCCESS)
+                {
+                    received_num_bytes = -1;
+                    free(second_packet);
+                    break;
+                }
                 free(second_packet);
-                break;
             }
-
-            free(second_packet);
+            pthread_mutex_unlock(&timestamp_mutex);
 
             second_packet = NULL;
             pos = 0;
@@ -292,10 +342,17 @@ void *handle_client(void *arg)
             second_packet_length = 0;
             break; // Exit the receiving loop to wait for a new connection
         }
-        else if (write_packet_to_file(buffer, received_num_bytes, aesdsocketdata) != EXIT_SUCCESS)
-        {
-            received_num_bytes = -1;
-            break;
+        else 
+        {  
+            // No newline found, just write what we have to the file and continue receiving 
+            pthread_mutex_lock(&timestamp_mutex);
+            if (write_packet_to_file(buffer, received_num_bytes) != EXIT_SUCCESS)
+            {
+                received_num_bytes = -1;
+                break;
+            }
+            pthread_mutex_unlock(&timestamp_mutex);
+            syslog(LOG_DEBUG, "No packet delimiter found in %ld bytes\n", received_num_bytes);
         }
     }
 
@@ -366,6 +423,25 @@ int setup_sigaction()
     return EXIT_SUCCESS;
 }
 
+void cleanup()
+{
+    // Cleanup resources
+    pthread_mutex_destroy(&timestamp_mutex);
+    pthread_mutex_destroy(&list_mutex);
+    pthread_cond_destroy(&list_cond);
+
+    // Free any remaining threads in the finished list
+    struct thread_entry *entry;
+    while (!TAILQ_EMPTY(&finished_threads))
+    {
+        entry = TAILQ_FIRST(&finished_threads);
+        TAILQ_REMOVE(&finished_threads, entry, entries);
+        pthread_join(entry->tid, NULL);
+        free(entry);
+    }
+    remove(READWRITEFILETPATH);
+}
+
 int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
 {
     int *connected_fd;
@@ -373,20 +449,14 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
     socklen_t client_addr_size;
     char client_addr_str[INET6_ADDRSTRLEN];
 
-    /*     char *buf = NULL;
-        ssize_t received_num_bytes;
-        ssize_t first_packet_length = 0;
-        ssize_t second_packet_length = 0;
-        char* second_packet = NULL;
-        int size_to_send = 0;
-        int pos = 0; */
-
     if (socket_fd == NULL)
     {
         syslog(LOG_ERR, "NULL socket file descriptor pointer provided\n");
         return EXIT_FAILURE;
     }
     printf("aesd server: waiting for connections...\n");
+
+    launch_periodic_timer();
 
     // Server is running. Main accept() loop
     while (!(g_sigint || g_sigterm))
@@ -434,7 +504,6 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
             free(data);
             continue;
         }
-        data->path_storage_file = aesdsocketdata;
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, handle_client, data) != 0)
@@ -443,11 +512,11 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
             close(*connected_fd);
             free(connected_fd);
         }
-        
+
         // Don't detach — cleanup thread will join it later
         // close(connected_fd); // Moved to handle_client
     }
-
+    cleanup();
     return EXIT_SUCCESS;
 }
 
@@ -531,7 +600,7 @@ int start_with_daemon(int *socket_fd)
     return pid;
 }
 
-int start_aesd_server(bool daemon, int *socket_fd, const char *filename)
+int start_aesd_server(bool daemon, int *socket_fd)
 {
     struct addrinfo hints, *addr_info, *ptr_it_addrinfo;
     int sockfd;
@@ -627,15 +696,15 @@ int start_aesd_server(bool daemon, int *socket_fd, const char *filename)
 
     syslog(LOG_DEBUG, "Waiting for connections...\n");
 
-    if (run_aesd_server(socket_fd, filename) != EXIT_SUCCESS)
+    if (run_aesd_server(socket_fd, READWRITEFILETPATH) != EXIT_SUCCESS)
     {
         close(*socket_fd);
         return EXIT_FAILURE;
     }
 
-    if (unlink(filename) != 0)
+    if (unlink(READWRITEFILETPATH) != 0)
     {
-        syslog(LOG_WARNING, "%s delete failed: %m", filename);
+        syslog(LOG_WARNING, "%s delete failed: %m", READWRITEFILETPATH);
     }
 
     close(*socket_fd);
@@ -653,16 +722,16 @@ int main(int argc, char **argv)
     pthread_detach(cleaner);
 
     int socket_fd;
-    const char *aesdsocketdata = "/var/tmp/aesdsocketdata";
-    truncate(aesdsocketdata, 0);
+
+    truncate(READWRITEFILETPATH, 0);
 
     if (argc == 1)
     {
-        exit(start_aesd_server(false, &socket_fd, aesdsocketdata));
+        exit(start_aesd_server(false, &socket_fd));
     }
     else if (argc == 2 && strcmp(argv[1], "-d") == 0)
     {
-        exit(start_aesd_server(true, &socket_fd, aesdsocketdata));
+        exit(start_aesd_server(true, &socket_fd));
     }
     else
     {
