@@ -209,7 +209,7 @@ void *cleanup_thread(void *arg)
 {
     struct thread_entry *entry;
 
-    while (1)
+    while (!g_sigint && !g_sigterm)
     {
         pthread_mutex_lock(&list_mutex);
         while (TAILQ_EMPTY(&finished_threads))
@@ -226,7 +226,7 @@ void *cleanup_thread(void *arg)
         pthread_join(entry->tid, NULL);
         free(entry);
     }
-
+    free(entry);
     return NULL;
 }
 
@@ -439,7 +439,7 @@ void cleanup()
         pthread_join(entry->tid, NULL);
         free(entry);
     }
-    remove(READWRITEFILETPATH);
+    return;
 }
 
 int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
@@ -520,93 +520,13 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
     return EXIT_SUCCESS;
 }
 
-int start_with_daemon(int *socket_fd)
-{
-    pid_t pid = fork();
-
-    if (pid > 0)
-    {
-        return pid;
-    }
-    else if (pid < 0)
-    {
-        syslog(LOG_ERR, "Failure daemon fork: %m\n");
-        return pid;
-    }
-
-    if (setsid() == -1)
-    {
-        syslog(LOG_ERR, "Failure daemon setsid: %m\n");
-        return -1;
-    }
-
-    if (chdir("/") == -1)
-    {
-        syslog(LOG_ERR, "Failure daemon chdir: %m\n");
-        return -1;
-    }
-
-    int maxfd = sysconf(_SC_OPEN_MAX);
-    if (maxfd < 0 || maxfd > MAXDATASIZE)
-    {
-        maxfd = MAXDATASIZE;
-    }
-
-    // Cleanup: Close all open file descriptors
-    for (int fd_cnt = 0; fd_cnt < maxfd; fd_cnt++)
-    {
-        if (*socket_fd != fd_cnt)
-        {
-            close(fd_cnt);
-        }
-    }
-
-    // Daemon process launch: Open /dev/null and redirect stdin, stdout, stderr to it
-    int fd = open("/dev/null", O_RDWR);
-    if (fd < 0)
-    {
-        syslog(LOG_ERR, "Error openning file /dev/null: %m\n");
-        return -1;
-    }
-
-    // Redirect stdin, stdout, stderr to /dev/null
-    if (dup2(fd, STDIN_FILENO) < 0)
-    {
-        syslog(LOG_ERR, "dup2 stdin failed: %m");
-        close(fd);
-        return -1;
-    }
-
-    if (dup2(fd, STDOUT_FILENO) < 0)
-    {
-        syslog(LOG_ERR, "dup2 stdout failed: %m");
-        close(fd);
-        return -1;
-    }
-
-    if (dup2(fd, STDERR_FILENO) < 0)
-    {
-        syslog(LOG_ERR, "dup2 stderr failed: %m");
-        close(fd);
-        return -1;
-    }
-
-    // Check and close extra /dev/null fd, not stdin, stdout, or stderr
-    if (fd > 2)
-    {
-        close(fd);
-    }
-
-    return pid;
-}
-
-int start_aesd_server(bool daemon, int *socket_fd)
+int start_aesd_server(bool daemon_mode, int *socket_fd)
 {
     struct addrinfo hints, *addr_info, *ptr_it_addrinfo;
     int sockfd;
     int yes = 1;
     int ret_code;
-    syslog(LOG_DEBUG, "Start server %s\n", daemon ? " (daemon)" : "");
+    syslog(LOG_DEBUG, "Start server %s\n", daemon_mode ? " (daemon)" : "");
 
     // Setup server socket
     memset(&hints, 0, sizeof hints);
@@ -671,18 +591,12 @@ int start_aesd_server(bool daemon, int *socket_fd)
     // Pass socket fd back to main
     *socket_fd = sockfd;
 
-    if (daemon)
+    if (daemon_mode)
     {
-        pid_t pid = start_with_daemon(socket_fd);
-        if (pid > 0)
-        {
-            syslog(LOG_DEBUG, "Shutdown daemon parent process. Child process pid %d\n", pid);
-            return EXIT_SUCCESS;
-        }
-        else if (pid < 0)
-        {
-            close(*socket_fd);
-            return EXIT_FAILURE;
+        // Daemonize the process with librarry call
+        if (daemon(0, 0) == -1) {
+            syslog(LOG_ERR, "Failed to daemonize");
+            return -1;
         }
 
         syslog(LOG_DEBUG, "Started daemon in child process\n");
