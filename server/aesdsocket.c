@@ -13,9 +13,16 @@
 #include <errno.h>
 #include <sys/syslog.h>
 #include <fcntl.h>
-#include <sys/queue.h>
+// #include <sys/queue.h>
 #include <pthread.h>
 #include <sys/time.h>
+// #include "queue.h"   // quotes = local file
+
+#ifdef HAVE_SLIST_FOREACH_SAFE
+#include <sys/queue.h>
+#else
+#include "queue.h"
+#endif
 
 #define PORT "9000"
 #define BACKLOG 10       // how many pending connections queue will hold
@@ -24,26 +31,24 @@
 
 bool g_sigterm = false;
 bool g_sigint = false;
+FILE *fd = NULL; // File descriptor for read/write file
 pthread_mutex_t timestamp_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-struct client_data
-{
-    int client_fd;
-    char *client_addr_string;
-};
 // ========== Thread list entry ==========
 struct thread_entry
 {
-    pthread_t tid;
+    pthread_t conn_tid;
+    int client_conn_fd;
+    bool work_finished;
+    char *client_addr_string;
     TAILQ_ENTRY(thread_entry)
     entries;
 };
 
 TAILQ_HEAD(thread_list, thread_entry);
 
-struct thread_list finished_threads;
+struct thread_list launched_threads;
 pthread_mutex_t list_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t list_cond = PTHREAD_COND_INITIALIZER;
 
 // ========== Function prototypes ==========
 int write_packet_to_file(const char *message, size_t message_size)
@@ -59,33 +64,32 @@ int write_packet_to_file(const char *message, size_t message_size)
     }
 
     syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
+    printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
 
-    FILE *file = fopen(READWRITEFILETPATH, "a");
-    if (file == NULL)
+    if (fd == NULL)
     {
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return EXIT_FAILURE;
     }
-
-    size_t written = fwrite(message, 1, message_size, file);
+    pthread_mutex_lock(&timestamp_mutex);
+    size_t written = fwrite(message, 1, message_size, fd);
     if (written != message_size)
     {
         syslog(
             LOG_ERR, "Error writing to file %s: tried to write %zu bytes, only %zu bytes written: %m\n",
             READWRITEFILETPATH, message_size, written);
-        fclose(file);
+        fclose(fd);
         return EXIT_FAILURE;
     }
 
     // Ensure data is flushed to disk
-    if (fflush(file) != 0)
+    if (fflush(fd) != 0)
     {
         syslog(LOG_ERR, "Error flushing file %s: %m\n", READWRITEFILETPATH);
-        fclose(file);
+        fclose(fd);
         return EXIT_FAILURE;
     }
-
-    fclose(file);
+    pthread_mutex_unlock(&timestamp_mutex);
     return EXIT_SUCCESS;
 }
 
@@ -102,12 +106,10 @@ void alarm_handler(int signo, siginfo_t *info, void *context)
     timeinfo = localtime(&rawtime);
     strftime(buffer, sizeof(buffer), "timestamp: %H:%M:%S\n", timeinfo);
 
-    pthread_mutex_lock(&timestamp_mutex);
     if (write_packet_to_file(buffer, strlen(buffer)) != EXIT_SUCCESS)
     {
         syslog(LOG_ERR, "Failed to write timestamp to file\n");
     }
-    pthread_mutex_unlock(&timestamp_mutex);
 }
 
 void launch_periodic_timer()
@@ -149,7 +151,6 @@ int read_packet_from_file(char *message, size_t message_size, int pos)
         return -1;
     }
 
-    FILE *fd = fopen(READWRITEFILETPATH, "r");
     if (fd == NULL)
     {
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
@@ -170,8 +171,6 @@ int read_packet_from_file(char *message, size_t message_size, int pos)
         fclose(fd);
         return -1;
     }
-
-    fclose(fd);
     return (ssize_t)read;
 }
 
@@ -192,7 +191,7 @@ int sendall(int socket_fd, const char *buf, size_t len)
                 continue; // Retry on interrupt
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                // For non-blocking sockets, you might want to wait or retry
+                // For non-blocking sockets, one might want to wait or retry
                 continue;
             }
             syslog(LOG_ERR, "sendall failed to send %zu bytes: %m\n", len - total);
@@ -208,44 +207,55 @@ int sendall(int socket_fd, const char *buf, size_t len)
 void *cleanup_thread(void *arg)
 {
     struct thread_entry *entry;
-
-    while (!g_sigint && !g_sigterm)
+    struct thread_entry *tmp_entry;
+    printf("Cleanup thread started\n");
+    if (!g_sigint && !g_sigterm)
     {
-        pthread_mutex_lock(&list_mutex);
-        while (TAILQ_EMPTY(&finished_threads))
-        {
-            pthread_cond_wait(&list_cond, &list_mutex);
-        }
-
+        int count = 0;
         // Remove first finished thread
-        entry = TAILQ_FIRST(&finished_threads);
-        TAILQ_REMOVE(&finished_threads, entry, entries);
-        pthread_mutex_unlock(&list_mutex);
-
-        // Join outside lock
-        pthread_join(entry->tid, NULL);
-        free(entry);
+        entry = TAILQ_FIRST(&launched_threads);
+        if (entry == NULL)
+        {
+            return NULL;
+        }
+        TAILQ_FOREACH_SAFE(entry, &launched_threads, entries, tmp_entry)
+        {
+            if (entry->work_finished)
+            {
+                pthread_join(entry->conn_tid, NULL);
+                free(entry->client_addr_string);
+                TAILQ_REMOVE(&launched_threads, entry, entries);
+                free(entry);
+            }
+        }
+        TAILQ_FOREACH(entry, &launched_threads, entries)
+        {
+            count++;
+        }
+        printf("Remains %d threads. Cleanup thread finished cleaning up\n", count);
     }
-    free(entry);
+
+    printf("Cleanup thread exiting\n");
     return NULL;
 }
 
 // ========== Worker function ==========
 void *handle_client(void *arg)
 {
-    struct client_data *client_info = (struct client_data *)arg;
-    int client_fd = client_info->client_fd;
-    char *client_addr_str = client_info->client_addr_string;
-    // const char *aesdsocketdata = client_info->path_storage_file;
-    free(client_info->client_addr_string);
-    free(client_info);
-
+    struct thread_entry *client_info = (struct thread_entry *)arg;
+    if (client_info == NULL)
+    {
+        syslog(LOG_ERR, "NULL client info pointer provided\n");
+        return (void *)EXIT_FAILURE;
+    }
     // Allocate buffer for receiving data
     char *buffer = malloc(MAXDATASIZE);
     if (buffer == NULL)
     {
         syslog(LOG_ERR, "not enough memory: %m\n");
-        close(client_fd);
+        close(client_info->client_conn_fd);
+        free(client_info->client_addr_string);       
+        free(client_info); 
         return (void *)EXIT_FAILURE;
     }
 
@@ -256,17 +266,10 @@ void *handle_client(void *arg)
     int size_to_send = 0;
     int pos = 0;
 
-    if (buffer == NULL)
-    {
-        syslog(LOG_ERR, "not enough memory: %m\n");
-        close(client_fd);
-        return (void *)EXIT_FAILURE;
-    }
-
-    printf("Client connected (fd=%d)\n", client_fd);
+    printf("Client connected (fd=%d), (sent tid=%lu), current tid=%lu\n", client_info->client_conn_fd, (unsigned long)client_info->conn_tid, (unsigned long)pthread_self());
 
     // Receive data and send back
-    while ((received_num_bytes = recv(client_fd, buffer, MAXDATASIZE, 0)) > 0)
+    while ((received_num_bytes = recv(client_info->client_conn_fd, buffer, MAXDATASIZE, 0)) > 0)
     {
         char *eol = memchr(buffer, '\n', received_num_bytes);
         if (eol != NULL)
@@ -275,13 +278,12 @@ void *handle_client(void *arg)
             first_packet_length = eol - buffer + 1; // Include the newline character
             syslog(LOG_DEBUG, "Found packet delimiter at %ld\n", received_num_bytes);
 
-            pthread_mutex_lock(&timestamp_mutex);
+            printf("Received %ld bytes from %s\n", received_num_bytes, client_info->client_addr_string);
             if (write_packet_to_file(buffer, received_num_bytes) != EXIT_SUCCESS)
             {
                 received_num_bytes = -1;
                 break;
             }
-            pthread_mutex_unlock(&timestamp_mutex);
 
             // Then receive the next packet if any
             second_packet_length = received_num_bytes - first_packet_length;
@@ -290,7 +292,7 @@ void *handle_client(void *arg)
             if (second_packet == NULL)
             {
                 syslog(LOG_ERR, "not enough memory for the next packet: %m\n");
-                close(client_fd);
+                close(client_info->client_conn_fd);
                 free(buffer);
                 return (void *)EXIT_FAILURE;
             }
@@ -300,10 +302,10 @@ void *handle_client(void *arg)
             while ((size_to_send = read_packet_from_file(buffer, MAXDATASIZE, pos)) > 0)
             {
                 pos += size_to_send;
-                if (sendall(client_fd, buffer, size_to_send) == -1)
+                if (sendall(client_info->client_conn_fd, buffer, size_to_send) == -1)
                 {
-                    syslog(LOG_ERR, "failed to send %d message to client %s\n", size_to_send, client_addr_str);
-                    close(client_fd);
+                    syslog(LOG_ERR, "failed to send %d message to client %s\n", size_to_send, client_info->client_addr_string);
+                    close(client_info->client_conn_fd);
                     free(buffer);
                     free(second_packet);
                     return (void *)EXIT_FAILURE;
@@ -317,13 +319,14 @@ void *handle_client(void *arg)
 
             if (size_to_send < 0)
             {
-                close(client_fd);
+                close(client_info->client_conn_fd);
                 free(buffer);
                 free(second_packet);
                 return (void *)EXIT_FAILURE;
             }
             // Finally write the remaining part of the second packet if any
-            pthread_mutex_lock(&timestamp_mutex);
+
+            printf("Writing remaining part of second packet\n");
             if (second_packet != NULL && second_packet_length > 0)
             {
                 if (write_packet_to_file(second_packet, second_packet_length) != EXIT_SUCCESS)
@@ -334,24 +337,21 @@ void *handle_client(void *arg)
                 }
                 free(second_packet);
             }
-            pthread_mutex_unlock(&timestamp_mutex);
-
+            free(second_packet);
             second_packet = NULL;
             pos = 0;
             first_packet_length = 0;
             second_packet_length = 0;
             break; // Exit the receiving loop to wait for a new connection
         }
-        else 
-        {  
-            // No newline found, just write what we have to the file and continue receiving 
-            pthread_mutex_lock(&timestamp_mutex);
+        else
+        {
+            // No newline found, just write what we have to the file and continue receiving
             if (write_packet_to_file(buffer, received_num_bytes) != EXIT_SUCCESS)
             {
                 received_num_bytes = -1;
                 break;
             }
-            pthread_mutex_unlock(&timestamp_mutex);
             syslog(LOG_DEBUG, "No packet delimiter found in %ld bytes\n", received_num_bytes);
         }
     }
@@ -362,28 +362,47 @@ void *handle_client(void *arg)
     }
     else if (received_num_bytes == 0)
     {
-        syslog(LOG_DEBUG, "Connection from %s closed\n", client_addr_str);
+        syslog(LOG_DEBUG, "Connection from %s closed\n", client_info->client_addr_string);
     }
 
-    printf("Client disconnected (fd=%d)\n", client_fd);
-    close(client_fd);
+    printf("Client disconnected (fd=%d)\n", client_info->client_conn_fd);
+    // Cleanup resources
+    close(client_info->client_conn_fd);
     free(buffer);
     free(second_packet);
-
-    // Register myself in cleanup list
-    struct thread_entry *entry = malloc(sizeof(struct thread_entry));
-    if (entry)
-    {
-        entry->tid = pthread_self();
-        pthread_mutex_lock(&list_mutex);
-        TAILQ_INSERT_TAIL(&finished_threads, entry, entries);
-        pthread_cond_signal(&list_cond);
-        pthread_mutex_unlock(&list_mutex);
-    }
+    second_packet = NULL;
+    free(client_info->client_addr_string);
+    client_info->client_addr_string = NULL;
+    
+    // Mark work as finished
+    client_info->work_finished = true;
 
     return NULL;
 }
 // ========== Signal handling ==========
+
+void cleanup()
+{
+    printf("Cleaning up resources started\n");
+    // Cleanup resources
+    pthread_mutex_destroy(&timestamp_mutex);
+    fclose(fd);
+    // Free any remaining threads in the finished list
+    struct thread_entry *entry;
+    while (!TAILQ_EMPTY(&launched_threads))
+    {
+        entry = TAILQ_FIRST(&launched_threads);
+        TAILQ_REMOVE(&launched_threads, entry, entries);
+        pthread_join(entry->conn_tid, NULL);
+        free(entry->client_addr_string);
+        free(entry);
+    }
+    remove(READWRITEFILETPATH);
+    printf("Server exiting\n");
+    syslog(LOG_DEBUG, "Server exiting\n");
+    closelog();
+    return;
+}
 
 void sig_handler(int s)
 {
@@ -394,6 +413,11 @@ void sig_handler(int s)
     else if (s == SIGINT)
     {
         g_sigint = true;
+    }
+    if (g_sigint || g_sigterm)
+    {
+        cleanup();
+        exit(EXIT_SUCCESS);
     }
 }
 
@@ -419,32 +443,13 @@ int setup_sigaction()
         syslog(LOG_ERR, "signal action failed for SIGINT: %m\n");
         return EXIT_FAILURE;
     }
-
     return EXIT_SUCCESS;
-}
-
-void cleanup()
-{
-    // Cleanup resources
-    pthread_mutex_destroy(&timestamp_mutex);
-    pthread_mutex_destroy(&list_mutex);
-    pthread_cond_destroy(&list_cond);
-
-    // Free any remaining threads in the finished list
-    struct thread_entry *entry;
-    while (!TAILQ_EMPTY(&finished_threads))
-    {
-        entry = TAILQ_FIRST(&finished_threads);
-        TAILQ_REMOVE(&finished_threads, entry, entries);
-        pthread_join(entry->tid, NULL);
-        free(entry);
-    }
-    return;
 }
 
 int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
 {
-    int *connected_fd;
+    int connected_fd;
+    int *ptr_conn_fd = &connected_fd;
     struct sockaddr_storage client_addr;
     socklen_t client_addr_size;
     char client_addr_str[INET6_ADDRSTRLEN];
@@ -456,21 +461,22 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
     }
     printf("aesd server: waiting for connections...\n");
 
+    fd = fopen(READWRITEFILETPATH, "a+");
+    if (!fd)
+    {
+        syslog(LOG_ERR, "Failed to open file: %m\n");
+        return EXIT_FAILURE;
+    }
+
     launch_periodic_timer();
 
     // Server is running. Main accept() loop
-    while (!(g_sigint || g_sigterm))
+    while (!g_sigterm && !g_sigint)
     {
-        connected_fd = malloc(sizeof(int));
-        if (!connected_fd)
-        {
-            perror("malloc client fd");
-            continue;
-        }
-        // memset(&client_addr, 0, sizeof client_addr);
+        memset(&client_addr, 0, sizeof client_addr);
         client_addr_size = sizeof client_addr;
-        *connected_fd = accept(*socket_fd, (struct sockaddr *)&client_addr, &client_addr_size);
-        if (*connected_fd == -1)
+        connected_fd = accept(*socket_fd, (struct sockaddr *)&client_addr, &client_addr_size);
+        if (connected_fd == -1)
         {
             syslog(LOG_ERR, "accept");
             continue;
@@ -481,41 +487,36 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
         if (inet_ntop(client_addr.ss_family, &client_addr, client_addr_str, sizeof(client_addr_str)) == NULL)
         {
             syslog(LOG_ERR, "inet_ntop failure: %m\n");
-            close(*connected_fd);
             continue;
         }
-
+        printf("Accepted connection from %s\n", client_addr_str);
         syslog(LOG_DEBUG, "Accepted connection from %s\n", client_addr_str);
 
-        // Create a thread to handle the client
-        struct client_data *data = malloc(sizeof(struct client_data));
-        if (!data)
+        // Create a thread to handle the client         
+        struct thread_entry *entry = malloc(sizeof(struct thread_entry));
+        if (entry)
         {
-            perror("malloc");
-            close(*connected_fd);
-            continue;
-        }
-        data->client_fd = *connected_fd;
-        data->client_addr_string = strdup(client_addr_str);
-        if (!data->client_addr_string)
-        {
-            perror("strdup");
-            close(*connected_fd);
-            free(data);
-            continue;
+            entry->client_conn_fd = *ptr_conn_fd;
+            entry->client_addr_string = strdup(client_addr_str);
+            entry->work_finished = false;
+
+            TAILQ_INSERT_TAIL(&launched_threads, entry, entries);
         }
 
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, handle_client, data) != 0)
+        if (pthread_create(&entry->conn_tid, NULL, handle_client, entry) != 0)
         {
             perror("pthread_create");
-            close(*connected_fd);
-            free(connected_fd);
+            free(entry->client_addr_string);
+            free(entry);
+            close(*ptr_conn_fd);
+            continue;
         }
+        printf("Launched thread %lu for client %s (fd=%d)\n", (unsigned long)entry->conn_tid, client_addr_str, *ptr_conn_fd);
 
         // Don't detach — cleanup thread will join it later
-        // close(connected_fd); // Moved to handle_client
+        cleanup_thread(NULL);
     }
+
     cleanup();
     return EXIT_SUCCESS;
 }
@@ -594,7 +595,8 @@ int start_aesd_server(bool daemon_mode, int *socket_fd)
     if (daemon_mode)
     {
         // Daemonize the process with librarry call
-        if (daemon(0, 0) == -1) {
+        if (daemon(0, 0) == -1)
+        {
             syslog(LOG_ERR, "Failed to daemonize");
             return -1;
         }
@@ -628,12 +630,7 @@ int start_aesd_server(bool daemon_mode, int *socket_fd)
 
 int main(int argc, char **argv)
 {
-    TAILQ_INIT(&finished_threads);
-
-    // Create cleanup thread
-    pthread_t cleaner;
-    pthread_create(&cleaner, NULL, cleanup_thread, NULL);
-    pthread_detach(cleaner);
+    TAILQ_INIT(&launched_threads);
 
     int socket_fd;
 
