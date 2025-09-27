@@ -13,10 +13,8 @@
 #include <errno.h>
 #include <sys/syslog.h>
 #include <fcntl.h>
-// #include <sys/queue.h>
 #include <pthread.h>
 #include <sys/time.h>
-// #include "queue.h"   // quotes = local file
 
 #ifdef HAVE_SLIST_FOREACH_SAFE
 #include <sys/queue.h>
@@ -32,7 +30,7 @@
 bool g_sigterm = false;
 bool g_sigint = false;
 FILE *fd = NULL; // File descriptor for read/write file
-pthread_mutex_t timestamp_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t writer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ========== Thread list entry ==========
 struct thread_entry
@@ -48,7 +46,6 @@ struct thread_entry
 TAILQ_HEAD(thread_list, thread_entry);
 
 struct thread_list launched_threads;
-pthread_mutex_t list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ========== Function prototypes ==========
 int write_packet_to_file(const char *message, size_t message_size)
@@ -64,14 +61,14 @@ int write_packet_to_file(const char *message, size_t message_size)
     }
 
     syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
-    printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
+    // printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
 
     if (fd == NULL)
     {
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return EXIT_FAILURE;
     }
-    pthread_mutex_lock(&timestamp_mutex);
+    pthread_mutex_lock(&writer_mutex);
     size_t written = fwrite(message, 1, message_size, fd);
     if (written != message_size)
     {
@@ -89,7 +86,7 @@ int write_packet_to_file(const char *message, size_t message_size)
         fclose(fd);
         return EXIT_FAILURE;
     }
-    pthread_mutex_unlock(&timestamp_mutex);
+    pthread_mutex_unlock(&writer_mutex);
     return EXIT_SUCCESS;
 }
 
@@ -208,7 +205,7 @@ void *cleanup_thread(void *arg)
 {
     struct thread_entry *entry;
     struct thread_entry *tmp_entry;
-    printf("Cleanup thread started\n");
+   // printf("Cleanup thread started\n");
     if (!g_sigint && !g_sigterm)
     {
         int count = 0;
@@ -235,7 +232,7 @@ void *cleanup_thread(void *arg)
         printf("Remains %d threads. Cleanup thread finished cleaning up\n", count);
     }
 
-    printf("Cleanup thread exiting\n");
+    // printf("Cleanup thread exiting\n");
     return NULL;
 }
 
@@ -326,7 +323,7 @@ void *handle_client(void *arg)
             }
             // Finally write the remaining part of the second packet if any
 
-            printf("Writing remaining part of second packet\n");
+            // printf("Writing remaining part of second packet\n");
             if (second_packet != NULL && second_packet_length > 0)
             {
                 if (write_packet_to_file(second_packet, second_packet_length) != EXIT_SUCCESS)
@@ -365,7 +362,7 @@ void *handle_client(void *arg)
         syslog(LOG_DEBUG, "Connection from %s closed\n", client_info->client_addr_string);
     }
 
-    printf("Client disconnected (fd=%d)\n", client_info->client_conn_fd);
+    // printf("Client disconnected (fd=%d)\n", client_info->client_conn_fd);
     // Cleanup resources
     close(client_info->client_conn_fd);
     free(buffer);
@@ -373,7 +370,7 @@ void *handle_client(void *arg)
     second_packet = NULL;
     free(client_info->client_addr_string);
     client_info->client_addr_string = NULL;
-    
+
     // Mark work as finished
     client_info->work_finished = true;
 
@@ -383,9 +380,9 @@ void *handle_client(void *arg)
 
 void cleanup()
 {
-    printf("Cleaning up resources started\n");
+    // printf("Cleaning up resources started\n");
     // Cleanup resources
-    pthread_mutex_destroy(&timestamp_mutex);
+    pthread_mutex_destroy(&writer_mutex);
     fclose(fd);
     // Free any remaining threads in the finished list
     struct thread_entry *entry;
@@ -398,7 +395,7 @@ void cleanup()
         free(entry);
     }
     remove(READWRITEFILETPATH);
-    printf("Server exiting\n");
+    // printf("Server exiting\n");
     syslog(LOG_DEBUG, "Server exiting\n");
     closelog();
     return;
@@ -489,7 +486,7 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
             syslog(LOG_ERR, "inet_ntop failure: %m\n");
             continue;
         }
-        printf("Accepted connection from %s\n", client_addr_str);
+        // printf("Accepted connection from %s\n", client_addr_str);
         syslog(LOG_DEBUG, "Accepted connection from %s\n", client_addr_str);
 
         // Create a thread to handle the client         
@@ -511,7 +508,7 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
             close(*ptr_conn_fd);
             continue;
         }
-        printf("Launched thread %lu for client %s (fd=%d)\n", (unsigned long)entry->conn_tid, client_addr_str, *ptr_conn_fd);
+        // printf("Launched thread %lu for client %s (fd=%d)\n", (unsigned long)entry->conn_tid, client_addr_str, *ptr_conn_fd);
 
         // Don't detach — cleanup thread will join it later
         cleanup_thread(NULL);
