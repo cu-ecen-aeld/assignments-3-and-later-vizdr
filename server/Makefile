@@ -1,7 +1,7 @@
 # Specify the cross-compile executable
 CROSS_COMPILE ?=
 
-CC = $(CROSS_COMPILE)gcc
+CC ?= $(CROSS_COMPILE)gcc
 $(info input: $(CROSS_COMPILE))
 $(info Using compiler: $(CC))
 CFLAGS ?= -g -Wall -Werror
