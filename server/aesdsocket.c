@@ -36,7 +36,12 @@
 
 bool g_sigterm = false;
 bool g_sigint = false;
+// differs for char device
+#ifndef USE_AESD_CHAR_DEVICE
 FILE *fd = NULL; // File descriptor for read/write file
+#else
+int fd = -1; // File descriptor for char device
+#endif
 
 #ifndef USE_AESD_CHAR_DEVICE
 pthread_mutex_t writer_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -79,7 +84,7 @@ int write_packet_to_file(const char *message, size_t message_size)
         return EXIT_FAILURE;
     }
 
-    #ifdef USE_AESD_CHAR_DEVICE
+#ifdef USE_AESD_CHAR_DEVICE
         // CHAR DEVICE IMPLEMENTATION
         // Open char device for writing
         fd = open(READWRITEFILETPATH, O_WRONLY);
@@ -87,14 +92,14 @@ int write_packet_to_file(const char *message, size_t message_size)
         if(fd == -1)
         {
             syslog(LOG_ERR, "Failed to open char device for writing");
-            break;
+            return EXIT_FAILURE;
         }
         // Write data to char device
         if(write(fd, message, message_size) == -1)
         {
             syslog(LOG_ERR, "Failed to write to char device");
             close(fd);
-            break;
+            return EXIT_FAILURE;
         }
         close(fd);
         fd = -1;
@@ -107,30 +112,12 @@ int write_packet_to_file(const char *message, size_t message_size)
             if(fd == -1)
             {
                 syslog(LOG_ERR, "Failed to open char device for reading");
-                break;
+                return EXIT_FAILURE;
             }
-            // Read content back from char device and send to client
-            /* char file_buffer[MAXDATASIZE];
-            ssize_t bytes_read;
-            ssize_t total_sent = 0;
-
-            while((bytes_read = read(fd, file_buffer, MAXDATASIZE)) > 0)
-            {
-                ssize_t sent = send(client_fd, file_buffer, bytes_read, 0);
-                if(sent == -1)
-                {
-                    syslog(LOG_ERR, "Failed to send data to client");
-                    break;
-                }
-                total_sent += sent;
-            } 
-            close(fd);
-            fd = -1; 
-            */
+            // next : read content back from char device and send to client
         }
 
 #else
-
     pthread_mutex_lock(&writer_mutex);
     size_t written = fwrite(message, 1, message_size, fd);
     if (written != message_size)
@@ -492,8 +479,15 @@ void cleanup()
     // Cleanup resources
 #ifndef USE_AESD_CHAR_DEVICE
     pthread_mutex_destroy(&writer_mutex);
-#endif
     fclose(fd);
+#else
+    if (fd != -1)
+    {
+        close(fd);
+        fd = -1;
+    }
+#endif
+    // Close all client connections and join threads  
     // Free any remaining threads in the finished list
     struct thread_entry *entry;
     while (!TAILQ_EMPTY(&launched_threads))
@@ -567,15 +561,15 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
         return EXIT_FAILURE;
     }
     printf("aesd server: waiting for connections...\n");
-
+// removed for char device
+#ifndef USE_AESD_CHAR_DEVICE
     fd = fopen(READWRITEFILETPATH, "a+");
     if (!fd)
     {
         syslog(LOG_ERR, "Failed to open file: %m\n");
         return EXIT_FAILURE;
     }
-// removed for char device
-#ifndef USE_AESD_CHAR_DEVICE
+
     launch_periodic_timer();
 #endif
 
