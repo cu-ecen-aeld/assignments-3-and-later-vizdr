@@ -78,46 +78,45 @@ int write_packet_to_file(const char *message, size_t message_size)
     syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
     // printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
 
+#ifdef USE_AESD_CHAR_DEVICE
+    // CHAR DEVICE IMPLEMENTATION
+    // Open char device for writing
+    fd = open(READWRITEFILETPATH, O_WRONLY);
+
+    if (fd == -1)
+    {
+        syslog(LOG_ERR, "Failed to open char device for writing");
+        return EXIT_FAILURE;
+    }
+    // Write data to char device
+    if (write(fd, message, message_size) == -1)
+    {
+        syslog(LOG_ERR, "Failed to write to char device");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+    close(fd);
+    fd = -1;
+
+    // Check if packet is complete and ends w/ newline
+    if (memchr(message, '\n', message_size) != NULL)
+    {
+        // Open char device for reading back
+        fd = open(READWRITEFILETPATH, O_RDONLY);
+        if (fd == -1)
+        {
+            syslog(LOG_ERR, "Failed to open char device for reading");
+            return EXIT_FAILURE;
+        }
+        // next : read content back from char device and send to client
+    }
+
+#else
     if (fd == NULL)
     {
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return EXIT_FAILURE;
     }
-
-#ifdef USE_AESD_CHAR_DEVICE
-        // CHAR DEVICE IMPLEMENTATION
-        // Open char device for writing
-        fd = open(READWRITEFILETPATH, O_WRONLY);
-
-        if(fd == -1)
-        {
-            syslog(LOG_ERR, "Failed to open char device for writing");
-            return EXIT_FAILURE;
-        }
-        // Write data to char device
-        if(write(fd, message, message_size) == -1)
-        {
-            syslog(LOG_ERR, "Failed to write to char device");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-        close(fd);
-        fd = -1;
-
-        // Check if packet is complete and ends w/ newline
-        if(memchr(message, '\n', message_size) != NULL)
-        {
-            // Open char device for reading back
-            fd = open(READWRITEFILETPATH, O_RDONLY);
-            if(fd == -1)
-            {
-                syslog(LOG_ERR, "Failed to open char device for reading");
-                return EXIT_FAILURE;
-            }
-            // next : read content back from char device and send to client
-        }
-
-#else
     pthread_mutex_lock(&writer_mutex);
     size_t written = fwrite(message, 1, message_size, fd);
     if (written != message_size)
@@ -255,7 +254,6 @@ int read_packet_from_file(char *message, size_t message_size, int pos)
 
 #endif
 
-
     return (ssize_t)read;
 }
 
@@ -288,7 +286,7 @@ int sendall(int socket_fd, const char *buf, size_t len)
         {
             syslog(LOG_ERR, "sendall failed to send %zu bytes: %m\n", len - total);
             return -1;
-        }   
+        }
 #endif
         total += sent;
     }
@@ -301,7 +299,7 @@ void *cleanup_thread(void *arg)
 {
     struct thread_entry *entry;
     struct thread_entry *tmp_entry;
-   // printf("Cleanup thread started\n");
+    // printf("Cleanup thread started\n");
     if (!g_sigint && !g_sigterm)
     {
         int count = 0;
@@ -347,8 +345,8 @@ void *handle_client(void *arg)
     {
         syslog(LOG_ERR, "not enough memory: %m\n");
         close(client_info->client_conn_fd);
-        free(client_info->client_addr_string);       
-        free(client_info); 
+        free(client_info->client_addr_string);
+        free(client_info);
         return (void *)EXIT_FAILURE;
     }
 
@@ -487,7 +485,7 @@ void cleanup()
         fd = -1;
     }
 #endif
-    // Close all client connections and join threads  
+    // Close all client connections and join threads
     // Free any remaining threads in the finished list
     struct thread_entry *entry;
     while (!TAILQ_EMPTY(&launched_threads))
@@ -595,7 +593,7 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
         // printf("Accepted connection from %s\n", client_addr_str);
         syslog(LOG_DEBUG, "Accepted connection from %s\n", client_addr_str);
 
-        // Create a thread to handle the client         
+        // Create a thread to handle the client
         struct thread_entry *entry = malloc(sizeof(struct thread_entry));
         if (entry)
         {

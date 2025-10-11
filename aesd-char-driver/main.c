@@ -49,6 +49,7 @@ int aesd_release(struct inode *inode, struct file *filp)
 
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
+    struct aesd_dev *dev = filp->private_data;
     ssize_t retval = 0;
     size_t entry_offset = 0;
     struct aesd_buffer_entry *entry = NULL;
