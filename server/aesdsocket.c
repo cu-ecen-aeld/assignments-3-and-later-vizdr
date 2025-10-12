@@ -568,7 +568,7 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
         return EXIT_FAILURE;
     }
 
-    launch_periodic_timer();
+//    launch_periodic_timer();
 #endif
 
     // Server is running. Main accept() loop
