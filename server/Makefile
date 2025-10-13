@@ -12,7 +12,7 @@ LDFLAGS ?= -pthread
 OBJS := $(SRC:.c=.o)
 
 # Char device flag: 1 enable, 0 disable
-CFLAGS += -DUSE_AESD_CHAR_DEVICE=1
+#CFLAGS += -DUSE_AESD_CHAR_DEVICE=1
 
 all: $(TARGET)
 
