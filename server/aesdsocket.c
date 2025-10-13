@@ -708,6 +708,7 @@ int main(int argc, char **argv)
 
     int socket_fd;
 
+#ifndef USE_AESD_CHAR_DEVICE
     int fd = open(READWRITEFILETPATH, O_RDWR | O_CREAT, 0666);
     if (fd == -1)
     {
@@ -721,7 +722,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     close(fd);
-
+#endif
     if (argc == 1)
     {
         exit(start_aesd_server(false, &socket_fd));
