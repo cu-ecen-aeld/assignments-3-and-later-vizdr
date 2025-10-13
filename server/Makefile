@@ -12,12 +12,7 @@ LDFLAGS ?= -pthread
 OBJS := $(SRC:.c=.o)
 
 # Char device flag: 1 enable, 0 disable
-USE_OUR_CHAR_DEVICE ?= 1
-
-ifeq ($(USE_OUR_CHAR_DEVICE),1)
 CFLAGS += -DUSE_AESD_CHAR_DEVICE=1
-INCLUDES = -I../aesd-char-driver
-endif;
 
 all: $(TARGET)
 
