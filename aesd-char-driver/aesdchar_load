@@ -1,9 +1,9 @@
-#!/bin/sh
+!/bin/sh
 module=aesdchar
 device=aesdchar
-mode="666"
-# cd `dirname $0`
-# set -e
+mode="664"
+cd `dirname $0`
+set -e
 # Group: since distributions do it differently, look for wheel or use staff
 if grep -q '^staff:' /etc/group; then
     group="staff"
@@ -11,30 +11,13 @@ else
     group="wheel"
 fi
 
-# Remove the module if it's already loaded
-/sbin/rmmod $module 2>/dev/null
-
 if [ -e ${module}.ko ]; then
     echo "Loading local built file ${module}.ko"
-    /sbin/insmod ./$module.ko $*
-    if [ $? -ne 0 ]; then
-        echo "Failed to load module, but continuing to check for device node creation"
-    fi
+    insmod ./$module.ko $* || exit 1
 else
     echo "Local file ${module}.ko not found, attempting to modprobe"
-    /sbin/modprobe ${module} || exit 1
+    modprobe ${module} || exit 1
 fi
-
-# Finding of major number
-major=$(awk "\$2==\"$module\" {print \$1}" /proc/devices)
-if [ -z "$major" ]; then
-    echo "Error: Could not find major number for $module in /proc/devices"
-    exit 1
-fi
-
-echo "major number found: $major"
-
-# Get the major number from /proc/devices
 major=$(awk "\$2==\"$module\" {print \$1}" /proc/devices)
 rm -f /dev/${device}
 mknod /dev/${device} c $major 0
