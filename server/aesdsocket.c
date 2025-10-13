@@ -109,7 +109,9 @@ int write_packet_to_file(const char *message, size_t message_size)
             READWRITEFILETPATH, message_size, written);
         close(fd);
         fd = -1;
+#ifndef USE_AESD_CHAR_DEVICE
         pthread_mutex_unlock(&writer_mutex);
+#endif
         return EXIT_FAILURE;
     }
 
@@ -120,7 +122,9 @@ int write_packet_to_file(const char *message, size_t message_size)
         syslog(LOG_ERR, "Error flushing file %s: %m\n", READWRITEFILETPATH);
         close(fd);
         fd = -1;
+#ifndef USE_AESD_CHAR_DEVICE
         pthread_mutex_unlock(&writer_mutex);
+#endif
         return EXIT_FAILURE;
     }
     close(fd);
