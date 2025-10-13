@@ -25,7 +25,6 @@
 #define PORT "9000"
 #define BACKLOG 10       // how many pending connections queue will hold
 #define MAXDATASIZE 1024 // max number of bytes we can get at once
-// #define READWRITEFILETPATH "/var/tmp/aesdsocketdata"
 
 // Add the build switch for char device
 #ifdef USE_AESD_CHAR_DEVICE
@@ -36,12 +35,8 @@
 
 bool g_sigterm = false;
 bool g_sigint = false;
-// differs for char device
-#ifndef USE_AESD_CHAR_DEVICE
-FILE *fd = NULL; // File descriptor for read/write file
-#else
-int fd = -1; // File descriptor for char device
-#endif
+
+int fd = -1; // file descriptor for read/write file
 
 #ifndef USE_AESD_CHAR_DEVICE
 pthread_mutex_t writer_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -76,33 +71,16 @@ int write_packet_to_file(const char *message, size_t message_size)
     }
 
     syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
-    // printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
+    printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
 
-#ifdef USE_AESD_CHAR_DEVICE
+/* #ifdef USE_AESD_CHAR_DEVICE
     // CHAR DEVICE IMPLEMENTATION
-    // Open char device for writing
-    fd = open(READWRITEFILETPATH, O_WRONLY);
-
-    if (fd == -1)
-    {
-        syslog(LOG_ERR, "Failed to open char device for writing");
-        return EXIT_FAILURE;
-    }
-    // Write data to char device
-    if (write(fd, message, message_size) == -1)
-    {
-        syslog(LOG_ERR, "Failed to write to char device");
-        close(fd);
-        return EXIT_FAILURE;
-    }
-    close(fd);
-    fd = -1;
 
     // Check if packet is complete and ends w/ newline
     if (memchr(message, '\n', message_size) != NULL)
     {
         // Open char device for reading back
-        fd = open(READWRITEFILETPATH, O_RDONLY);
+        fd = open(READWRITEFILETPATH, O_RDONLY, 0666);
         if (fd == -1)
         {
             syslog(LOG_ERR, "Failed to open char device for reading");
@@ -111,30 +89,43 @@ int write_packet_to_file(const char *message, size_t message_size)
         // next : read content back from char device and send to client
     }
 
-#else
-    if (fd == NULL)
+#endif */
+    fd = open(READWRITEFILETPATH, O_WRONLY | O_APPEND | O_CREAT, 0666);
+    if (fd == -1)
     {
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return EXIT_FAILURE;
     }
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&writer_mutex);
-    size_t written = fwrite(message, 1, message_size, fd);
+#endif
+    size_t written = write(fd, message, message_size);
+    printf("Wrote %zu bytes to %s\n", written, READWRITEFILETPATH);
     if (written != message_size)
     {
+        // printf("Partial write: tried to write %zu bytes, only %zu bytes written\n", message_size, written);
         syslog(
             LOG_ERR, "Error writing to file %s: tried to write %zu bytes, only %zu bytes written: %m\n",
             READWRITEFILETPATH, message_size, written);
-        fclose(fd);
+        close(fd);
+        fd = -1;
+        pthread_mutex_unlock(&writer_mutex);
         return EXIT_FAILURE;
     }
 
     // Ensure data is flushed to disk
-    if (fflush(fd) != 0)
+    if (fsync(fd) != 0)
     {
+        // printf("Error flushing file %s: %m\n", READWRITEFILETPATH);
         syslog(LOG_ERR, "Error flushing file %s: %m\n", READWRITEFILETPATH);
-        fclose(fd);
+        close(fd);
+        fd = -1;
+        pthread_mutex_unlock(&writer_mutex);
         return EXIT_FAILURE;
     }
+    close(fd);
+    fd = -1;
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_mutex_unlock(&writer_mutex);
 #endif
     return EXIT_SUCCESS;
@@ -198,16 +189,15 @@ int read_packet_from_file(char *message, size_t message_size, int pos)
         return -1;
     }
 
-    if (fd == NULL)
+    fd = open(READWRITEFILETPATH, O_RDWR, 0666);
+    if (fd == -1)
     {
-        syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
+        syslog(LOG_ERR, "Failed to open char device for reading");
         return -1;
     }
 
-#ifdef USE_AESD_CHAR_DEVICE
-    // CHAR DEVICE IMPLEMENTATION
     // Open char device for reading
-    fd = open(READWRITEFILETPATH, O_RDONLY);
+    fd = open(READWRITEFILETPATH, O_RDONLY, 0666);
     if (fd == -1)
     {
         syslog(LOG_ERR, "Failed to open char device for reading");
@@ -223,38 +213,19 @@ int read_packet_from_file(char *message, size_t message_size, int pos)
     }
 
     // Read data from char device
-    ssize_t read_bytes = read(fd, message, message_size);
-    if (read_bytes == -1)
+    ssize_t wasread = read(fd, message, message_size);
+    if (wasread == -1)
     {
         syslog(LOG_ERR, "Error reading from char device: %m\n");
         close(fd);
+        fd = -1;
         return -1;
     }
 
     close(fd);
     fd = -1;
 
-    return read_bytes;
-
-#else
-    if (fseeko(fd, pos, SEEK_SET) != 0)
-    {
-        syslog(LOG_ERR, "Error seeking file %s to position %ld: %m\n", READWRITEFILETPATH, (long)pos);
-        fclose(fd);
-        return -1;
-    }
-
-    size_t read = fread(message, 1, message_size, fd);
-    if (read < message_size && ferror(fd))
-    {
-        syslog(LOG_ERR, "Error reading file %s: %m\n", READWRITEFILETPATH);
-        fclose(fd);
-        return -1;
-    }
-
-#endif
-
-    return (ssize_t)read;
+    return wasread;
 }
 
 int sendall(int socket_fd, const char *buf, size_t len)
@@ -390,6 +361,7 @@ void *handle_client(void *arg)
 
             memcpy(second_packet, eol + 1, second_packet_length);
             // Now we read back from the file and send to the client
+           
             while ((size_to_send = read_packet_from_file(buffer, MAXDATASIZE, pos)) > 0)
             {
                 pos += size_to_send;
@@ -401,6 +373,7 @@ void *handle_client(void *arg)
                     free(second_packet);
                     return (void *)EXIT_FAILURE;
                 }
+                printf("Sent %d bytes to %s\n", size_to_send, client_info->client_addr_string);
                 if (size_to_send != MAXDATASIZE)
                 {
                     syslog(LOG_DEBUG, "End of file %d\n", pos);
@@ -415,8 +388,8 @@ void *handle_client(void *arg)
                 return (void *)EXIT_FAILURE;
             }
             // Finally write the remaining part of the second packet if any
-
             // printf("Writing remaining part of second packet\n");
+
             if (second_packet != NULL && second_packet_length > 0)
             {
                 if (write_packet_to_file(second_packet, second_packet_length) != EXIT_SUCCESS)
@@ -477,14 +450,11 @@ void cleanup()
     // Cleanup resources
 #ifndef USE_AESD_CHAR_DEVICE
     pthread_mutex_destroy(&writer_mutex);
-    fclose(fd);
-#else
-    if (fd != -1)
-    {
-        close(fd);
-        fd = -1;
-    }
 #endif
+
+    if (fd != -1)
+        close(fd);
+    fd = -1;
     // Close all client connections and join threads
     // Free any remaining threads in the finished list
     struct thread_entry *entry;
@@ -561,7 +531,7 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
     printf("aesd server: waiting for connections...\n");
 // removed for char device
 #ifndef USE_AESD_CHAR_DEVICE
-    fd = fopen(READWRITEFILETPATH, "a+");
+    fd = open(READWRITEFILETPATH, O_WRONLY | O_APPEND | O_CREAT, 0666);
     if (!fd)
     {
         syslog(LOG_ERR, "Failed to open file: %m\n");
@@ -615,9 +585,8 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
         // printf("Launched thread %lu for client %s (fd=%d)\n", (unsigned long)entry->conn_tid, client_addr_str, *ptr_conn_fd);
 
         // Don't detach — cleanup thread will join it later
-        cleanup_thread(NULL);
     }
-
+    cleanup_thread(NULL);
     cleanup();
     return EXIT_SUCCESS;
 }
@@ -735,7 +704,19 @@ int main(int argc, char **argv)
 
     int socket_fd;
 
-    truncate(READWRITEFILETPATH, 0);
+    int fd = open(READWRITEFILETPATH, O_RDWR | O_CREAT, 0666);
+    if (fd == -1)
+    {
+        perror("open");
+        return EXIT_FAILURE;
+    }
+    if (ftruncate(fd, 0) != 0)
+    {
+        perror("ftruncate");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+    close(fd);
 
     if (argc == 1)
     {
