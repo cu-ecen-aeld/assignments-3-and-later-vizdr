@@ -75,7 +75,14 @@ int write_packet_to_file(const char *message, size_t message_size)
     syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
     printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
 
+    #if USE_AESD_CHAR_DEVICE
+    // For the character device: open without O_CREAT or O_APPEND
+    fd = open(READWRITEFILETPATH, O_WRONLY);
+#else
+    // For the regular file: allow creation and append
     fd = open(READWRITEFILETPATH, O_WRONLY | O_APPEND | O_CREAT, 0666);
+#endif
+
     if (fd == -1)
     {
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
@@ -84,9 +91,9 @@ int write_packet_to_file(const char *message, size_t message_size)
 #if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&writer_mutex);
 #endif
-    size_t written = write(fd, message, message_size);
+    ssize_t written = write(fd, message, message_size);   // use ssize_t for message_size
     printf("Wrote %zu bytes to %s\n", written, READWRITEFILETPATH);
-    if (written != message_size)
+    if (written != (ssize_t)message_size)
     {
         // printf("Partial write: tried to write %zu bytes, only %zu bytes written\n", message_size, written);
         syslog(
@@ -100,18 +107,21 @@ int write_packet_to_file(const char *message, size_t message_size)
         return EXIT_FAILURE;
     }
 
+#if !USE_AESD_CHAR_DEVICE
     // Ensure data is flushed to disk
+    // Only flush for regular files
     if (fsync(fd) != 0)
     {
         // printf("Error flushing file %s: %m\n", READWRITEFILETPATH);
         syslog(LOG_ERR, "Error flushing file %s: %m\n", READWRITEFILETPATH);
         close(fd);
         fd = -1;
-#if !USE_AESD_CHAR_DEVICE
+
         pthread_mutex_unlock(&writer_mutex);
-#endif
+
         return EXIT_FAILURE;
     }
+#endif
     close(fd);
     fd = -1;
 #if !USE_AESD_CHAR_DEVICE
