@@ -16,8 +16,6 @@
 #include <pthread.h>
 #include <sys/time.h>
 
-
-
 #ifdef HAVE_SLIST_FOREACH_SAFE
 #include <sys/queue.h>
 #else
@@ -38,7 +36,7 @@
 bool g_sigterm = false;
 bool g_sigint = false;
 
-int fd = -1; // file descriptor for read/write file
+volatile sig_atomic_t timer_fired = 0;
 
 #if !USE_AESD_CHAR_DEVICE
 pthread_mutex_t writer_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -62,6 +60,7 @@ struct thread_list launched_threads;
 // ========== Function prototypes ==========
 int write_packet_to_file(const char *message, size_t message_size)
 {
+    int fd = -1;
     if (message == NULL)
     {
         syslog(LOG_ERR, "NULL message pointer provided\n");
@@ -72,10 +71,10 @@ int write_packet_to_file(const char *message, size_t message_size)
         return EXIT_SUCCESS;
     }
 
-    syslog(LOG_DEBUG, "Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
-    printf("Writing message %zu bytes to %s\n", message_size, READWRITEFILETPATH);
+    syslog(LOG_DEBUG, "Writing message %zd bytes to %s\n", message_size, READWRITEFILETPATH);
+    printf("Writing message %zd bytes to %s\n", message_size, READWRITEFILETPATH);
 
-    #if USE_AESD_CHAR_DEVICE
+#if USE_AESD_CHAR_DEVICE
     // For the character device: open without O_CREAT or O_APPEND
     fd = open(READWRITEFILETPATH, O_WRONLY);
 #else
@@ -91,13 +90,13 @@ int write_packet_to_file(const char *message, size_t message_size)
 #if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&writer_mutex);
 #endif
-    ssize_t written = write(fd, message, message_size);   // use ssize_t for message_size
-    printf("Wrote %zu bytes to %s\n", written, READWRITEFILETPATH);
+    ssize_t written = write(fd, message, message_size); // use ssize_t for message_size
+    printf("Wrote %zd bytes to %s\n", written, READWRITEFILETPATH);
     if (written != (ssize_t)message_size)
     {
         // printf("Partial write: tried to write %zu bytes, only %zu bytes written\n", message_size, written);
         syslog(
-            LOG_ERR, "Error writing to file %s: tried to write %zu bytes, only %zu bytes written: %m\n",
+            LOG_ERR, "Error writing to file %s: tried to write %zd bytes, only %zd bytes written: %m\n",
             READWRITEFILETPATH, message_size, written);
         close(fd);
         fd = -1;
@@ -135,7 +134,8 @@ void alarm_handler(int signo, siginfo_t *info, void *context)
     (void)signo;
     (void)info;
     (void)context;
-    time_t rawtime;
+    timer_fired = 1; // flag for periodic work outside signal context
+    /* time_t rawtime;
     struct tm *timeinfo;
     char buffer[80];
 
@@ -146,7 +146,7 @@ void alarm_handler(int signo, siginfo_t *info, void *context)
     if (write_packet_to_file(buffer, strlen(buffer)) != EXIT_SUCCESS)
     {
         syslog(LOG_ERR, "Failed to write timestamp to file\n");
-    }
+    } */
 }
 
 void launch_periodic_timer()
@@ -175,56 +175,84 @@ void launch_periodic_timer()
     return;
 }
 
-int read_packet_from_file(char *message, size_t message_size, int pos)
+int read_packet_from_file(char **buffer, size_t *length)
 {
-    if (message_size == 0 || message == NULL)
+    int fd = -1;
+    if (buffer == NULL || length == NULL)
     {
-        syslog(LOG_WARNING, "0 buffer length provided or NULL message pointer\n");
-        return -1;
-    }
-    if (pos < 0)
-    {
-        syslog(LOG_ERR, "Negative file position provided: %ld\n", (long)pos);
-        return -1;
+        syslog(LOG_ERR, "NULL buffer or length pointer provided\n");
+        return EXIT_FAILURE;
     }
 
-/*     fd = open(READWRITEFILETPATH, O_RDWR, 0666);
+    // Dynamically allocate buffer and read entire file content
+    // Resize buffer as needed
+
+    ssize_t bytes_read;
+    size_t total_read = 0;
+    size_t buf_size = 1024;
+    char *temp = malloc(buf_size);
+
+    if (!temp)
+    {
+        syslog(LOG_ERR, "Memory allocation failed\n");
+        return EXIT_FAILURE;
+    }
+
+#if USE_AESD_CHAR_DEVICE
+    fd = open(READWRITEFILETPATH, O_NONBLOCK | O_RDONLY);
+#else
+    pthread_mutex_lock(&writer_mutex);
+    fd = open(READWRITEFILETPATH, O_RDONLY);
+#endif
+    
     if (fd == -1)
     {
-        syslog(LOG_ERR, "Failed to open char device for reading");
-        return -1;
-    } */
-
-    // Open char device for reading
-    fd = open(READWRITEFILETPATH, O_RDONLY, 0666);
-    if (fd == -1)
-    {
-        syslog(LOG_ERR, "Failed to open char device for reading");
-        return -1;
+        syslog(LOG_ERR, "Error opening %s for reading: %m\n", READWRITEFILETPATH);
+#if !USE_AESD_CHAR_DEVICE
+        pthread_mutex_unlock(&writer_mutex);
+#endif
+        free(temp);
+        return EXIT_FAILURE;
     }
 
-    // Seek to the specified position
-    if (lseek(fd, pos, SEEK_SET) == (off_t)-1)
+    while ((bytes_read = read(fd, temp + total_read, buf_size - total_read)) > 0)
     {
-        syslog(LOG_ERR, "Error seeking file %s to position %d: %m\n", READWRITEFILETPATH, pos);
-        close(fd);
-        return -1;
+        total_read += bytes_read;
+        if (total_read == buf_size)
+        {
+            buf_size *= 2;
+            char *new_buf = realloc(temp, buf_size);
+            if (!new_buf)
+            {
+                syslog(LOG_ERR, "Realloc failed\n");
+                free(temp);
+                close(fd);
+#if !USE_AESD_CHAR_DEVICE
+                pthread_mutex_unlock(&writer_mutex);
+#endif
+                return EXIT_FAILURE;
+            }
+            temp = new_buf;
+        }
     }
 
-    // Read data from char device
-    ssize_t wasread = read(fd, message, message_size);
-    if (wasread == -1)
+    if (bytes_read < 0)
     {
-        syslog(LOG_ERR, "Error reading from char device: %m\n");
-        close(fd);
-        fd = -1;
-        return -1;
+        syslog(LOG_ERR, "Error reading from %s: %m\n", READWRITEFILETPATH);
     }
 
     close(fd);
-    fd = -1;
+#if !USE_AESD_CHAR_DEVICE
+    pthread_mutex_unlock(&writer_mutex);
+#endif
 
-    return wasread;
+    *buffer = temp;
+    *length = total_read;
+
+    syslog(LOG_DEBUG, "Read %zu bytes from %s\n", total_read, READWRITEFILETPATH);
+    printf("Read %zu bytes from %s\n", total_read, READWRITEFILETPATH);
+
+    return EXIT_SUCCESS;
 }
 
 int sendall(int socket_fd, const char *buf, size_t len)
@@ -306,8 +334,16 @@ void *handle_client(void *arg)
         return (void *)EXIT_FAILURE;
     }
     // Allocate buffer for receiving data
-    char *buffer = malloc(MAXDATASIZE);
-    if (buffer == NULL)
+    char *recv_buf = malloc(MAXDATASIZE);
+    size_t recv_buf_size = 0;
+    ssize_t recv_bytes = 0;
+    char *newline_ptr;
+    char *packet = NULL;
+    size_t packet_len = 0;
+    char *read_buf = NULL;
+    size_t read_len = 0;
+
+    if (recv_buf == NULL)
     {
         syslog(LOG_ERR, "not enough memory: %m\n");
         close(client_info->client_conn_fd);
@@ -316,109 +352,87 @@ void *handle_client(void *arg)
         return (void *)EXIT_FAILURE;
     }
 
-    long int received_num_bytes;
-    ssize_t first_packet_length = 0;
-    ssize_t second_packet_length = 0;
-    char *second_packet = NULL;
-    int size_to_send = 0;
-    int pos = 0;
-
+    memset(recv_buf, 0, MAXDATASIZE);
     printf("Client connected (fd=%d), (sent tid=%lu), current tid=%lu\n", client_info->client_conn_fd, (unsigned long)client_info->conn_tid, (unsigned long)pthread_self());
 
     // Receive data and send back
-    while ((received_num_bytes = recv(client_info->client_conn_fd, buffer, MAXDATASIZE, 0)) > 0)
+    while ((recv_bytes = recv(client_info->client_conn_fd, recv_buf + recv_buf_size, MAXDATASIZE - recv_buf_size, 0)) > 0)
     {
-        char *eol = memchr(buffer, '\n', received_num_bytes);
-        if (eol != NULL)
-        {
-            // If we found a newline, which is end of packet, we first write to the file
-            first_packet_length = eol - buffer + 1; // Include the newline character
-            syslog(LOG_DEBUG, "Found packet delimiter at %ld\n", received_num_bytes);
+        recv_buf_size += recv_bytes;
+        recv_buf[recv_buf_size] = '\0';
 
-            printf("Received %ld bytes from %s\n", received_num_bytes, client_info->client_addr_string);
-            if (write_packet_to_file(buffer, received_num_bytes) != EXIT_SUCCESS)
+        // Look for end-of-line in the accumulated data
+        newline_ptr = strchr(recv_buf, '\n');
+        if (!newline_ptr)
+        {
+            // Continue receiving until full line received
+            if (recv_buf_size >= MAXDATASIZE)
             {
-                received_num_bytes = -1;
+                syslog(LOG_ERR, "Received data exceeds buffer limit\n");
                 break;
             }
-
-            // Then receive the next packet if any
-            second_packet_length = received_num_bytes - first_packet_length;
-            second_packet = malloc(second_packet_length);
-
-            if (second_packet == NULL)
-            {
-                syslog(LOG_ERR, "not enough memory for the next packet: %m\n");
-                close(client_info->client_conn_fd);
-                free(buffer);
-                return (void *)EXIT_FAILURE;
-            }
-
-            memcpy(second_packet, eol + 1, second_packet_length);
-            // Now we read back from the file and send to the client
-           
-            while ((size_to_send = read_packet_from_file(buffer, MAXDATASIZE, pos)) > 0)
-            {
-                pos += size_to_send;
-                if (sendall(client_info->client_conn_fd, buffer, size_to_send) == -1)
-                {
-                    syslog(LOG_ERR, "failed to send %d message to client %s\n", size_to_send, client_info->client_addr_string);
-                    close(client_info->client_conn_fd);
-                    free(buffer);
-                    free(second_packet);
-                    return (void *)EXIT_FAILURE;
-                }
-                printf("Sent %d bytes to %s\n", size_to_send, client_info->client_addr_string);
-                if (size_to_send != MAXDATASIZE)
-                {
-                    syslog(LOG_DEBUG, "End of file %d\n", pos);
-                    break;
-                }
-            }
-            if (size_to_send < 0)
-            {
-                close(client_info->client_conn_fd);
-                free(buffer);
-                free(second_packet);
-                return (void *)EXIT_FAILURE;
-            }
-            // Finally write the remaining part of the second packet if any
-            // printf("Writing remaining part of second packet\n");
-
-            if (second_packet != NULL && second_packet_length > 0)
-            {
-                if (write_packet_to_file(second_packet, second_packet_length) != EXIT_SUCCESS)
-                {
-                    received_num_bytes = -1;
-                    free(second_packet);
-                    break;
-                }
-                free(second_packet);
-            }
-            free(second_packet);
-            second_packet = NULL;
-            pos = 0;
-            first_packet_length = 0;
-            second_packet_length = 0;
-            break; // Exit the receiving loop to wait for a new connection
+            continue;
         }
-        else
+
+        // We found a full packet (line)
+        packet_len = newline_ptr - recv_buf + 1;
+        packet = malloc(packet_len);
+        if (!packet)
         {
-            // No newline found, just write what we have to the file and continue receiving
-            if (write_packet_to_file(buffer, received_num_bytes) != EXIT_SUCCESS)
-            {
-                received_num_bytes = -1;
-                break;
-            }
-            syslog(LOG_DEBUG, "No packet delimiter found in %ld bytes\n", received_num_bytes);
+            syslog(LOG_ERR, "malloc failed for packet: %m\n");
+            break;
         }
+
+        memcpy(packet, recv_buf, packet_len);
+
+        // Handle rest of buffer (may contain more data)
+        size_t remaining = recv_buf_size - packet_len;
+        memmove(recv_buf, newline_ptr + 1, remaining);
+        recv_buf_size = remaining;
+
+        // --- Write the received line ---
+        if (write_packet_to_file(packet, packet_len) != EXIT_SUCCESS)
+        {
+            syslog(LOG_ERR, "Failed to write packet to file/device\n");
+            free(packet);
+            break;
+        }
+        free(packet);
+        packet = NULL;
+
+        // --- Read back and send response ---
+        if (read_packet_from_file(&read_buf, &read_len) != EXIT_SUCCESS)
+        {
+            syslog(LOG_ERR, "Failed to read packet from file/device\n");
+            break;
+        }
+
+        if (sendall(client_info->client_conn_fd, read_buf, read_len) == -1)
+        {
+            syslog(LOG_ERR, "Failed to send data to client %s\n", client_info->client_addr_string);
+            free(read_buf);
+            break;
+        }
+
+        syslog(LOG_DEBUG, "Sent %zu bytes back to client %s\n", read_len, client_info->client_addr_string);
+        free(read_buf);
+        read_buf = NULL;
+
+#if !USE_AESD_CHAR_DEVICE
+        // --- Handle leftover (second) packet logic only for file mode ---
+        if (recv_buf_size > 0)
+        {
+            syslog(LOG_DEBUG, "Leftover data detected, processing next packet fragment\n");
+            // Process any leftover fragment in next loop iteration
+        }
+#endif
     }
 
-    if (received_num_bytes == -1)
+    if (recv_bytes < 0)
     {
         syslog(LOG_ERR, "Failure - received bytes: %m\n");
     }
-    else if (received_num_bytes == 0)
+    else if (recv_bytes == 0)
     {
         syslog(LOG_DEBUG, "Connection from %s closed\n", client_info->client_addr_string);
     }
@@ -426,9 +440,8 @@ void *handle_client(void *arg)
     // printf("Client disconnected (fd=%d)\n", client_info->client_conn_fd);
     // Cleanup resources
     close(client_info->client_conn_fd);
-    free(buffer);
-    free(second_packet);
-    second_packet = NULL;
+    free(recv_buf);
+
     free(client_info->client_addr_string);
     client_info->client_addr_string = NULL;
 
@@ -447,9 +460,6 @@ void cleanup()
     pthread_mutex_destroy(&writer_mutex);
 #endif
 
-    if (fd != -1)
-        close(fd);
-    fd = -1;
     // Close all client connections and join threads
     // Free any remaining threads in the finished list
     struct thread_entry *entry;
@@ -461,7 +471,10 @@ void cleanup()
         free(entry->client_addr_string);
         free(entry);
     }
+#if !USE_AESD_CHAR_DEVICE
+    printf("Deleting data file %s\n", READWRITEFILETPATH);
     remove(READWRITEFILETPATH);
+#endif
     // printf("Server exiting\n");
     syslog(LOG_DEBUG, "Server exiting\n");
     closelog();
@@ -524,12 +537,30 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
         return EXIT_FAILURE;
     }
     printf("aesd server: waiting for connections...\n");
-// removed for char device
-//    launch_periodic_timer();
+    // removed for char device
+    //    launch_periodic_timer();
 
     // Server is running. Main accept() loop
     while (!g_sigterm && !g_sigint)
     {
+        if (timer_fired)
+        {
+            time_t rawtime;
+            struct tm timeinfo;
+            char buffer[64];
+
+            time(&rawtime);
+            localtime_r(&rawtime, &timeinfo);
+            strftime(buffer, sizeof(buffer), "timestamp: %H:%M:%S\n", &timeinfo);
+
+            if (write_packet_to_file(buffer, strlen(buffer)) != EXIT_SUCCESS)
+            {
+                syslog(LOG_ERR, "Failed to write timestamp to file\n");
+            }
+
+            timer_fired = 0; // reset flag
+        }
+
         memset(&client_addr, 0, sizeof client_addr);
         client_addr_size = sizeof client_addr;
         connected_fd = accept(*socket_fd, (struct sockaddr *)&client_addr, &client_addr_size);
@@ -556,8 +587,6 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
             entry->client_conn_fd = *ptr_conn_fd;
             entry->client_addr_string = strdup(client_addr_str);
             entry->work_finished = false;
-
-            TAILQ_INSERT_TAIL(&launched_threads, entry, entries);
         }
 
         if (pthread_create(&entry->conn_tid, NULL, handle_client, entry) != 0)
@@ -568,6 +597,8 @@ int run_aesd_server(int *socket_fd, const char *aesdsocketdata)
             close(*ptr_conn_fd);
             continue;
         }
+
+        TAILQ_INSERT_TAIL(&launched_threads, entry, entries);
         // printf("Launched thread %lu for client %s (fd=%d)\n", (unsigned long)entry->conn_tid, client_addr_str, *ptr_conn_fd);
 
         // Don't detach — cleanup thread will join it later
@@ -583,6 +614,7 @@ int start_aesd_server(bool daemon_mode, int *socket_fd)
     int sockfd;
     int yes = 1;
     int ret_code;
+    int fd = -1;
     syslog(LOG_DEBUG, "Start server %s\n", daemon_mode ? " (daemon)" : "");
 
     // Setup server socket
