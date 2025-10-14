@@ -1,4 +1,4 @@
-!/bin/sh
+#!/bin/sh
 module=aesdchar
 device=aesdchar
 mode="664"

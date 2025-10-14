@@ -40,7 +40,7 @@ bool g_sigint = false;
 
 int fd = -1; // file descriptor for read/write file
 
-#if USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
 pthread_mutex_t writer_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
@@ -81,7 +81,7 @@ int write_packet_to_file(const char *message, size_t message_size)
         syslog(LOG_ERR, "Error opening file %s: %m\n", READWRITEFILETPATH);
         return EXIT_FAILURE;
     }
-#if USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_lock(&writer_mutex);
 #endif
     size_t written = write(fd, message, message_size);
@@ -94,7 +94,7 @@ int write_packet_to_file(const char *message, size_t message_size)
             READWRITEFILETPATH, message_size, written);
         close(fd);
         fd = -1;
-#if USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
         pthread_mutex_unlock(&writer_mutex);
 #endif
         return EXIT_FAILURE;
@@ -107,14 +107,14 @@ int write_packet_to_file(const char *message, size_t message_size)
         syslog(LOG_ERR, "Error flushing file %s: %m\n", READWRITEFILETPATH);
         close(fd);
         fd = -1;
-#if USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
         pthread_mutex_unlock(&writer_mutex);
 #endif
         return EXIT_FAILURE;
     }
     close(fd);
     fd = -1;
-#if USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_unlock(&writer_mutex);
 #endif
     return EXIT_SUCCESS;
@@ -228,9 +228,10 @@ int sendall(int socket_fd, const char *buf, size_t len)
     while (total < len)
     {
         sent = send(socket_fd, buf + total, len - total, 0);
-#if USE_AESD_CHAR_DEVICE
+
         if (sent == -1)
         {
+#if !USE_AESD_CHAR_DEVICE
             if (errno == EINTR)
                 continue; // Retry on interrupt
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -238,16 +239,10 @@ int sendall(int socket_fd, const char *buf, size_t len)
                 // For non-blocking sockets, one might want to wait or retry
                 continue;
             }
-            syslog(LOG_ERR, "sendall failed to send %zu bytes: %m\n", len - total);
-            return -1;
-        }
-#else
-        if (sent == -1)
-        {
-            syslog(LOG_ERR, "sendall failed to send %zu bytes: %m\n", len - total);
-            return -1;
-        }
 #endif
+            syslog(LOG_ERR, "sendall failed to send %zu bytes: %m\n", len - total);
+            return -1;
+        }
         total += sent;
     }
 
@@ -438,7 +433,7 @@ void cleanup()
 {
     // printf("Cleaning up resources started\n");
     // Cleanup resources
-#if USE_AESD_CHAR_DEVICE
+#if !USE_AESD_CHAR_DEVICE
     pthread_mutex_destroy(&writer_mutex);
 #endif
 
