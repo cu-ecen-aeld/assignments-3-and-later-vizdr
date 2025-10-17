@@ -97,7 +97,7 @@ static long aesd_adjust_file_offset(struct file *filp, unsigned int write_cmd, u
     entry = &dev->circular_buffer.entry[cmd_index];
 
     // Make sure the provided write_cmd_offset is within the command length size
-    if (write_cmd_offset >= entry->size)
+    if (write_cmd_offset > entry->size)
     {
         PDEBUG("Invalid write_cmd_offset: %u >- %zu", write_cmd_offset, entry->size);
         mutex_unlock(&dev->lock);
