@@ -387,19 +387,16 @@ void *handle_client(void *arg)
 #endif
                 syslog(LOG_DEBUG, "Packet complete, reading back all content");
 
-#if USE_AESD_CHAR_DEVICE
-                // When using char device, f_pos may already have been modified by IOCTL seek.
-                // Just respond from the current file position.
-                syslog(LOG_DEBUG, "Using AESD char device: reading from current file position");
-                respond_to_client(data_file_fd, client_info->client_conn_fd);
-#else
                 // Normal socket write mode: send entire file from beginning
                 syslog(LOG_DEBUG, "Using regular file: reading full file from start");
+
                 off_t current_pos = lseek(data_file_fd, 0, SEEK_CUR);
                 lseek(data_file_fd, 0, SEEK_SET);
+
                 respond_to_client(data_file_fd, client_info->client_conn_fd);
+
                 lseek(data_file_fd, current_pos, SEEK_SET);
-#endif
+
 #if !USE_AESD_CHAR_DEVICE
                 pthread_mutex_unlock(&writer_mutex);
 #endif
