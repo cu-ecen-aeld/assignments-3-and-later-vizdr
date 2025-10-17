@@ -431,7 +431,7 @@ void *handle_client(void *arg)
 void check_seek_ioctl_requested(int bytes_received, char *buffer, unsigned int *write_cmd, unsigned int *write_cmd_offset)
 {
     const char prefix[] = "AESDCHAR_IOCSEEKTO:";
-    const size_t prefix_len = sizeof(prefix) - 1; /* 19 */
+    const size_t prefix_len = sizeof(prefix) - 2; /* 18 */
 
     ioctl_seek_requested = 0;
     if (bytes_received >= (int)prefix_len && strncmp(buffer, prefix, prefix_len) == 0)
