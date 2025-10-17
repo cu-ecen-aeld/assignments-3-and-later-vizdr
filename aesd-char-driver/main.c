@@ -18,6 +18,12 @@
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd-circular-buffer.h"
+#include <linux/slab.h>   // kmalloc, kfree
+#include <linux/uaccess.h> // copy_to_user, copy_from_user
+#include <linux/mutex.h>  // mutex  
+#include "aesd_ioctl.h"
+
 int aesd_major = 0; // use dynamic major
 int aesd_minor = 0;
 
@@ -239,7 +245,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     written = count;
     retval = written;
     // update f_pos to new end of file
-    *f_pos = aesd_get_total_size(dev);
+    *f_pos = aesd_get_cb_total_size(dev);
 
 out:
     mutex_unlock(&dev->lock);
