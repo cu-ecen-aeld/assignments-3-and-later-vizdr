@@ -450,11 +450,15 @@ void check_seek_ioctl_requested(int bytes_received, char *buffer, unsigned int *
         {
             syslog(LOG_DEBUG, "Processing seek command: cmd=%u, offset=%u",
                    *write_cmd, *write_cmd_offset);
+            printf("Processing seek command: cmd=%u, offset=%u\n",
+                   *write_cmd, *write_cmd_offset);
+
             ioctl_seek_requested = 1;
         }
         else
         {
             syslog(LOG_ERR, "Failed to parse seek command: '%s'", seek_buffer + prefix_len);
+            printf("Failed to parse seek command: '%s'\n", seek_buffer + prefix_len);
         }
     }
 }
