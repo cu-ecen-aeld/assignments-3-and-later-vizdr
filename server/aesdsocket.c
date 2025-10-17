@@ -446,7 +446,7 @@ void check_seek_ioctl_requested(int bytes_received, char *buffer, unsigned int *
             seek_buffer[--seek_len] = '\0';
         }
 
-        if (sscanf(seek_buffer + prefix_len, "%u,%u", write_cmd, write_cmd_offset) == 2)
+        if (sscanf(seek_buffer + 19, "%u,%u", write_cmd, write_cmd_offset) == 2)
         {
             syslog(LOG_DEBUG, "Processing seek command: cmd=%u, offset=%u",
                    *write_cmd, *write_cmd_offset);
