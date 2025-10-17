@@ -367,6 +367,7 @@ void *handle_client(void *arg)
             {
                 syslog(LOG_DEBUG, "AESDCHAR_IOCSEEKTO ioctl succeeded: cmd=%u, offset=%u",
                        seekto.write_cmd, seekto.write_cmd_offset);
+                respond_to_client(data_file_fd, client_info->client_conn_fd);
             }
             ioctl_seek_requested = 0; // reset flag
         }
