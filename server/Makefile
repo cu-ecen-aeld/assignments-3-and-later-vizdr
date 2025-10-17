@@ -5,8 +5,11 @@ CC ?= $(CROSS_COMPILE)gcc
 $(info input: $(CROSS_COMPILE))
 $(info Using compiler: $(CC))
 CFLAGS ?= -g -Wall -Werror
+# adjust path as needed
+CFLAGS += -I$(SRCDIR)
 SRCDIR = .
 SRC = aesdsocket.c
+INCLUDES = -I../aesd_char_driver
 TARGET = aesdsocket
 LDFLAGS ?= -pthread
 OBJS := $(SRC:.c=.o)
