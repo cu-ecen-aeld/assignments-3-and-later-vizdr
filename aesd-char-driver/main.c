@@ -109,7 +109,7 @@ static long aesd_adjust_file_offset(struct file *filp, unsigned int write_cmd, u
     {
         int prev_cmd_index = (dev->circular_buffer.out_offs + i) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
         struct aesd_buffer_entry *prev_entry = &dev->circular_buffer.entry[prev_cmd_index];
-        total_offset += prev_entry->size;
+        total_offset += prev_entry->size + 1;
     }
 
     // Add the offset within the target command
